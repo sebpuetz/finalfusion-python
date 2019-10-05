@@ -29,17 +29,18 @@ impl PyVocab {
         embeds.vocab().idx(key.as_str()).map(|idx| {
             let gil = pyo3::Python::acquire_gil();
             match idx {
-                WordIndex::Word(idx) => [idx].to_object(gil.python()),
+                WordIndex::Word(idx) => idx.to_object(gil.python()),
                 WordIndex::Subword(indices) => indices.to_object(gil.python()),
             }
         })
     }
 
-    fn ngram_indices(&self, word: &str) -> PyResult<Option<Vec<(String, usize)>>> {
+    fn ngram_indices(&self, word: &str) -> PyResult<Option<Vec<(String, Option<usize>)>>> {
         let embeds = self.embeddings.borrow();
         match embeds.vocab() {
             VocabWrap::FastTextSubwordVocab(inner) => Ok(inner.ngram_indices(word)),
             VocabWrap::FinalfusionSubwordVocab(inner) => Ok(inner.ngram_indices(word)),
+            VocabWrap::FinalfusionNGramVocab(inner) => Ok(inner.ngram_indices(word)),
             VocabWrap::SimpleVocab(_) => Err(exceptions::ValueError::py_err(
                 "querying n-gram indices is not supported for this vocabulary",
             )),
@@ -51,6 +52,7 @@ impl PyVocab {
         match embeds.vocab() {
             VocabWrap::FastTextSubwordVocab(inner) => Ok(inner.subword_indices(word)),
             VocabWrap::FinalfusionSubwordVocab(inner) => Ok(inner.subword_indices(word)),
+            VocabWrap::FinalfusionNGramVocab(inner) => Ok(inner.subword_indices(word)),
             VocabWrap::SimpleVocab(_) => Err(exceptions::ValueError::py_err(
                 "querying subwords' indices is not supported for this vocabulary",
             )),
@@ -85,6 +87,6 @@ impl PySequenceProtocol for PyVocab {
                 WordIndex::Word(_) => true,
                 WordIndex::Subword(_) => false,
             })
-            .is_some())
+            .unwrap_or(false))
     }
 }
