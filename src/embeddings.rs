@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
+use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 
 use failure::Error;
@@ -13,13 +14,13 @@ use finalfusion::io as ffio;
 use finalfusion::prelude::*;
 use finalfusion::similarity::*;
 use itertools::Itertools;
-use ndarray::{s, Array2, ArrayViewMut2, Array1, ArrayViewMut1};
+use ndarray::{s, Array1, Array2, ArrayViewMut1, ArrayViewMut2};
 use numpy::{IntoPyArray, NpyDataType, PyArray1, PyArray2, ToPyArray};
 use pyo3::class::iter::PyIterProtocol;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyTuple};
 use pyo3::{exceptions, PyMappingProtocol};
-use toml::{self, Value};
+use toml::Value;
 
 use crate::{EmbeddingsWrap, PyEmbeddingIterator, PyVocab, PyWordSimilarity};
 
@@ -154,7 +155,8 @@ impl PyEmbeddings {
 
     /// Get the model's vocabulary.
     fn vocab(&self) -> PyResult<PyVocab> {
-        Ok(PyVocab::new(self.embeddings.clone()))
+        let embeddings = self.embeddings.borrow();
+        Ok(PyVocab::new(embeddings.vocab().clone()))
     }
 
     /// Perform an anology query.
@@ -315,7 +317,7 @@ impl PyEmbeddings {
     fn embedding_similarity(
         &self,
         py: Python,
-        embedding: PyEmbedding,
+        embedding: PyVec,
         skip: Skips,
         limit: usize,
     ) -> PyResult<Vec<PyObject>> {
@@ -327,8 +329,6 @@ impl PyEmbeddings {
             )
         })?;
 
-        let embedding = embedding.0.as_array();
-
         if embedding.shape()[0] != embeddings.storage().shape().1 {
             return Err(exceptions::ValueError::py_err(format!(
                 "Incompatible embedding shapes: embeddings: ({},), query: ({},)",
@@ -337,7 +337,7 @@ impl PyEmbeddings {
             )));
         }
 
-        let results = embeddings.embedding_similarity_masked(embedding, limit, &skip.0);
+        let results = embeddings.embedding_similarity_masked(embedding.view(), limit, &skip.0);
 
         Self::similarity_results(
             py,
@@ -363,32 +363,105 @@ impl PyEmbeddings {
         }
     }
 
+    /// clone_with_updated_matrix(matrix,/ normalize)
+    ///
     /// Clone the Embeddings with a new embedding matrix.
+    ///
+    /// `normalize' toggles normalization of the known-word representations, i.e.
+    /// `matrix[:len(vocab)]`
     #[args(normalize = true)]
-    fn clone_with_updated_matrix(&self, embedding_matrix: PyMatrix, normalize: bool) -> PyResult<PyEmbeddings> {
+    fn clone_with_updated_matrix(
+        &self,
+        mut matrix: PyMatrix,
+        normalize: bool,
+    ) -> PyResult<PyEmbeddings> {
         let embeddings = self.embeddings.borrow();
         let vocab = embeddings.vocab().to_owned();
         let metadata = match &*embeddings {
             EmbeddingsWrap::View(e) => e.metadata(),
             EmbeddingsWrap::NonView(e) => e.metadata(),
-        }.cloned().map(|mut m| {
+        }
+        .cloned()
+        .map(|mut m| {
             if let Value::Table(ref mut t) = m.0 {
                 t.insert("normalized".into(), Value::Boolean(normalize));
             };
             m
-        }
-        );
-        let mut matrix = embedding_matrix.0.as_array().to_owned();
+        });
         if matrix.shape()[0] != vocab.vocab_len() {
-            return Err(exceptions::AssertionError::py_err(format!("Vocab length and matrix shape don't match. {} vs {}", matrix.shape()[0], vocab.vocab_len())));
+            return Err(exceptions::AssertionError::py_err(format!(
+                "Vocab length and matrix shape don't match. {} vs {}",
+                matrix.shape()[0],
+                vocab.vocab_len()
+            )));
         }
         let norms = if normalize {
+            #[allow(clippy::deref_addrof)]
             l2_normalize_array(matrix.slice_mut(s![..vocab.words_len(), ..]))
         } else {
             Array1::ones(vocab.words_len())
         };
-        let matrix = StorageViewWrap::NdArray(NdArray::new(matrix));
+        let matrix = StorageViewWrap::NdArray(NdArray::new(matrix.0));
         let e = Embeddings::new(metadata, vocab, matrix, NdNorms(norms));
+        Ok(PyEmbeddings {
+            embeddings: Rc::new(RefCell::new(EmbeddingsWrap::View(e))),
+        })
+    }
+
+    /// from_parts(matrix, vocab,/ metadata, norms)
+    /// --
+    ///
+    /// Construct new `Embeddings` from given parts.
+    ///
+    /// The `vocab`'s `max_idx` has to match the first dimension of `matrix`. `len(vocab)` - which
+    /// is different from `max_idx` has to match the length of `norms` if given.
+    ///
+    /// If no `norms` are passed, the norms of the `Embeddings` are filled with ones.
+    ///
+    /// The returned `Embeddings` holds no references to any of the inputs. All components are
+    /// copied to the newly created `Embeddings`.
+    #[staticmethod]
+    #[args(metadata = "\"\"", norms = "PyVec::default()")]
+    fn from_parts(
+        matrix: PyMatrix,
+        vocab: PyVocab,
+        metadata: &str,
+        norms: PyVec,
+    ) -> PyResult<PyEmbeddings> {
+        let vocab = vocab.clone_vocab();
+        let metadata = if metadata.is_empty() {
+            None
+        } else {
+            metadata
+                .parse::<Value>()
+                .map(Metadata)
+                .map(Some)
+                .map_err(|err| {
+                    exceptions::ValueError::py_err(format!("Metadata is invalid TOML: {}", err))
+                })?
+        };
+        if matrix.shape()[0] != vocab.vocab_len() {
+            return Err(exceptions::AssertionError::py_err(format!(
+                "Vocab length and matrix shape don't match. {} vs {}",
+                vocab.vocab_len(),
+                matrix.shape()[0],
+            )));
+        }
+        let norms = if norms.is_empty() {
+            NdNorms(Array1::ones(vocab.words_len()))
+        } else {
+            if vocab.words_len() != norms.len() {
+                return Err(exceptions::AssertionError::py_err(format!(
+                    "Vocab length and norms shape don't match. {} vs {}",
+                    vocab.words_len(),
+                    norms.len(),
+                )));
+            }
+            NdNorms(norms.0)
+        };
+
+        let matrix = StorageViewWrap::NdArray(NdArray::new(matrix.0));
+        let e = Embeddings::new(metadata, vocab, matrix, norms);
         Ok(PyEmbeddings {
             embeddings: Rc::new(RefCell::new(EmbeddingsWrap::View(e))),
         })
@@ -444,8 +517,8 @@ impl PyIterProtocol for PyEmbeddings {
 }
 
 fn read_embeddings<S>(path: &str, mmap: bool) -> Result<Embeddings<VocabWrap, S>, Error>
-    where
-        Embeddings<VocabWrap, S>: ReadEmbeddings + MmapEmbeddings,
+where
+    Embeddings<VocabWrap, S>: ReadEmbeddings + MmapEmbeddings,
 {
     let f = File::open(path)?;
     let mut reader = BufReader::new(f);
@@ -460,10 +533,10 @@ fn read_embeddings<S>(path: &str, mmap: bool) -> Result<Embeddings<VocabWrap, S>
 }
 
 fn read_non_fifu_embeddings<R, V>(path: &str, read_embeddings: R) -> PyResult<PyEmbeddings>
-    where
-        R: FnOnce(&mut BufReader<File>) -> ffio::Result<Embeddings<V, NdArray>>,
-        V: Vocab,
-        Embeddings<VocabWrap, StorageViewWrap>: From<Embeddings<V, NdArray>>,
+where
+    R: FnOnce(&mut BufReader<File>) -> ffio::Result<Embeddings<V, NdArray>>,
+    V: Vocab,
+    Embeddings<VocabWrap, StorageViewWrap>: From<Embeddings<V, NdArray>>,
 {
     let f = File::open(path).map_err(|err| {
         exceptions::IOError::py_err(format!(
@@ -496,19 +569,34 @@ impl<'a> FromPyObject<'a> for Skips<'a> {
         for el in ob
             .iter()
             .map_err(|_| exceptions::TypeError::py_err("Iterable expected"))?
-            {
-                let el = el?;
-                set.insert(el.extract().map_err(|_| {
-                    exceptions::TypeError::py_err(format!("Expected String not: {}", el))
-                })?);
-            }
+        {
+            let el = el?;
+            set.insert(el.extract().map_err(|_| {
+                exceptions::TypeError::py_err(format!("Expected String not: {}", el))
+            })?);
+        }
         Ok(Skips(set))
     }
 }
 
-struct PyEmbedding<'a>(&'a PyArray1<f32>);
+#[derive(Default)]
+struct PyVec(Array1<f32>);
 
-impl<'a> FromPyObject<'a> for PyEmbedding<'a> {
+impl Deref for PyVec {
+    type Target = Array1<f32>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for PyVec {
+    fn deref_mut(&mut self) -> &mut Array1<f32> {
+        &mut self.0
+    }
+}
+
+impl<'a> FromPyObject<'a> for PyVec {
     fn extract(ob: &'a PyAny) -> Result<Self, PyErr> {
         let embedding = ob
             .downcast_ref::<PyArray1<f32>>()
@@ -519,13 +607,28 @@ impl<'a> FromPyObject<'a> for PyEmbedding<'a> {
                 embedding.data_type()
             )));
         };
-        Ok(PyEmbedding(embedding))
+
+        Ok(PyVec(embedding.as_array().to_owned()))
     }
 }
 
-struct PyMatrix<'a>(&'a PyArray2<f32>);
+struct PyMatrix(Array2<f32>);
 
-impl<'a> FromPyObject<'a> for PyMatrix<'a> {
+impl Deref for PyMatrix {
+    type Target = Array2<f32>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for PyMatrix {
+    fn deref_mut(&mut self) -> &mut Array2<f32> {
+        &mut self.0
+    }
+}
+
+impl<'a> FromPyObject<'a> for PyMatrix {
     fn extract(ob: &'a PyAny) -> Result<Self, PyErr> {
         let embedding = ob
             .downcast_ref::<PyArray2<f32>>()
@@ -536,7 +639,7 @@ impl<'a> FromPyObject<'a> for PyMatrix<'a> {
                 embedding.data_type()
             )));
         };
-        Ok(PyMatrix(embedding))
+        Ok(PyMatrix(embedding.as_array().to_owned()))
     }
 }
 
