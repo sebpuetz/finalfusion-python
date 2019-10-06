@@ -62,6 +62,11 @@ impl PyVocab {
             )),
         }
     }
+
+    fn max_idx(&self) -> usize {
+        let embeds = self.embeddings.borrow();
+        embeds.vocab().vocab_len()
+    }
 }
 
 #[pyproto]
