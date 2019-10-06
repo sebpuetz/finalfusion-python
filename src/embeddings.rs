@@ -6,13 +6,14 @@ use std::rc::Rc;
 
 use failure::Error;
 use finalfusion::chunks::metadata::Metadata;
+use finalfusion::chunks::norms::NdNorms;
 use finalfusion::compat::text::{ReadText, ReadTextDims};
 use finalfusion::compat::word2vec::ReadWord2Vec;
 use finalfusion::io as ffio;
 use finalfusion::prelude::*;
 use finalfusion::similarity::*;
 use itertools::Itertools;
-use ndarray::Array2;
+use ndarray::{s, Array2, ArrayViewMut2, Array1, ArrayViewMut1};
 use numpy::{IntoPyArray, NpyDataType, PyArray1, PyArray2, ToPyArray};
 use pyo3::class::iter::PyIterProtocol;
 use pyo3::prelude::*;
@@ -23,7 +24,7 @@ use toml::{self, Value};
 use crate::{EmbeddingsWrap, PyEmbeddingIterator, PyVocab, PyWordSimilarity};
 
 /// finalfusion embeddings.
-#[pyclass(name=Embeddings)]
+#[pyclass(name = Embeddings)]
 pub struct PyEmbeddings {
     // The use of Rc + RefCell should be safe in this crate:
     //
@@ -361,6 +362,37 @@ impl PyEmbeddings {
                 .map_err(|err| exceptions::IOError::py_err(err.to_string())),
         }
     }
+
+    /// Clone the Embeddings with a new embedding matrix.
+    #[args(normalize = true)]
+    fn clone_with_updated_matrix(&self, embedding_matrix: PyMatrix, normalize: bool) -> PyResult<PyEmbeddings> {
+        let embeddings = self.embeddings.borrow();
+        let vocab = embeddings.vocab().to_owned();
+        let metadata = match &*embeddings {
+            EmbeddingsWrap::View(e) => e.metadata(),
+            EmbeddingsWrap::NonView(e) => e.metadata(),
+        }.cloned().map(|mut m| {
+            if let Value::Table(ref mut t) = m.0 {
+                t.insert("normalized".into(), Value::Boolean(normalize));
+            };
+            m
+        }
+        );
+        let mut matrix = embedding_matrix.0.as_array().to_owned();
+        if matrix.shape()[0] != vocab.vocab_len() {
+            return Err(exceptions::AssertionError::py_err(format!("Vocab length and matrix shape don't match. {} vs {}", matrix.shape()[0], vocab.vocab_len())));
+        }
+        let norms = if normalize {
+            l2_normalize_array(matrix.slice_mut(s![..vocab.words_len(), ..]))
+        } else {
+            Array1::ones(vocab.words_len())
+        };
+        let matrix = StorageViewWrap::NdArray(NdArray::new(matrix));
+        let e = Embeddings::new(metadata, vocab, matrix, NdNorms(norms));
+        Ok(PyEmbeddings {
+            embeddings: Rc::new(RefCell::new(EmbeddingsWrap::View(e))),
+        })
+    }
 }
 
 impl PyEmbeddings {
@@ -412,8 +444,8 @@ impl PyIterProtocol for PyEmbeddings {
 }
 
 fn read_embeddings<S>(path: &str, mmap: bool) -> Result<Embeddings<VocabWrap, S>, Error>
-where
-    Embeddings<VocabWrap, S>: ReadEmbeddings + MmapEmbeddings,
+    where
+        Embeddings<VocabWrap, S>: ReadEmbeddings + MmapEmbeddings,
 {
     let f = File::open(path)?;
     let mut reader = BufReader::new(f);
@@ -428,10 +460,10 @@ where
 }
 
 fn read_non_fifu_embeddings<R, V>(path: &str, read_embeddings: R) -> PyResult<PyEmbeddings>
-where
-    R: FnOnce(&mut BufReader<File>) -> ffio::Result<Embeddings<V, NdArray>>,
-    V: Vocab,
-    Embeddings<VocabWrap, StorageViewWrap>: From<Embeddings<V, NdArray>>,
+    where
+        R: FnOnce(&mut BufReader<File>) -> ffio::Result<Embeddings<V, NdArray>>,
+        V: Vocab,
+        Embeddings<VocabWrap, StorageViewWrap>: From<Embeddings<V, NdArray>>,
 {
     let f = File::open(path).map_err(|err| {
         exceptions::IOError::py_err(format!(
@@ -464,12 +496,12 @@ impl<'a> FromPyObject<'a> for Skips<'a> {
         for el in ob
             .iter()
             .map_err(|_| exceptions::TypeError::py_err("Iterable expected"))?
-        {
-            let el = el?;
-            set.insert(el.extract().map_err(|_| {
-                exceptions::TypeError::py_err(format!("Expected String not: {}", el))
-            })?);
-        }
+            {
+                let el = el?;
+                set.insert(el.extract().map_err(|_| {
+                    exceptions::TypeError::py_err(format!("Expected String not: {}", el))
+                })?);
+            }
         Ok(Skips(set))
     }
 }
@@ -489,4 +521,40 @@ impl<'a> FromPyObject<'a> for PyEmbedding<'a> {
         };
         Ok(PyEmbedding(embedding))
     }
+}
+
+struct PyMatrix<'a>(&'a PyArray2<f32>);
+
+impl<'a> FromPyObject<'a> for PyMatrix<'a> {
+    fn extract(ob: &'a PyAny) -> Result<Self, PyErr> {
+        let embedding = ob
+            .downcast_ref::<PyArray2<f32>>()
+            .map_err(|_| exceptions::TypeError::py_err("Expected 2d-array with dtype Float32"))?;
+        if embedding.data_type() != NpyDataType::Float32 {
+            return Err(exceptions::TypeError::py_err(format!(
+                "Expected dtype Float32, got {:?}",
+                embedding.data_type()
+            )));
+        };
+        Ok(PyMatrix(embedding))
+    }
+}
+
+fn l2_normalize_array(mut v: ArrayViewMut2<f32>) -> Array1<f32> {
+    let mut norms = Vec::with_capacity(v.rows());
+    for embedding in v.outer_iter_mut() {
+        norms.push(l2_normalize(embedding));
+    }
+
+    norms.into()
+}
+
+fn l2_normalize(mut v: ArrayViewMut1<f32>) -> f32 {
+    let norm = v.dot(&v).sqrt();
+
+    if norm != 0. {
+        v /= norm;
+    }
+
+    norm
 }
