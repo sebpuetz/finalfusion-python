@@ -311,6 +311,12 @@ impl PyEmbeddings {
         Self::similarity_results(py, results)
     }
 
+    fn norms(&self) -> Option<Py<PyArray1<f32>>> {
+        let embeddings = self.embeddings.borrow();
+        let gil = Python::acquire_gil();
+        embeddings.norms().map(|norms| norms.0.to_pyarray(gil.python()).to_owned())
+    }
+
     /// Perform a similarity query based on a query embedding.
     #[args(limit = 10, skip = "Skips(HashSet::new())")]
     fn embedding_similarity(
