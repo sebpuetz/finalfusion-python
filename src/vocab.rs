@@ -172,16 +172,19 @@ impl PyVocab {
     /// brackets, set this parameter to `False`.
     #[staticmethod]
     #[args(min_n = 3, max_n = 6, bracket = true)]
-    fn word_ngrams(word: &str, min_n: usize, max_n: usize, bracket: bool) -> Vec<String> {
+    fn word_ngrams(word: &str, min_n: usize, max_n: usize, bracket: bool) -> PyResult<Vec<String>> {
+        if min_n > max_n {
+            return Err(exceptions::ValueError::py_err("min_n is required to be greater than max_n"))
+        }
         let word = if bracket {
             Self::bracket(word)
         } else {
             word.to_string()
         };
 
-        NGrams::new(&word, min_n, max_n)
+        Ok(NGrams::new(&word, min_n, max_n)
             .map(|s| s.to_string())
-            .collect()
+            .collect())
     }
 
     /// Get the subword index for the given ngram.
@@ -214,8 +217,9 @@ impl PyVocab {
         })
     }
 
-    fn ngram_indices(&self, word: &str) -> PyResult<Option<Vec<NGramIndex>>> {
-        Ok(match self.vocab.as_ref() {
+    #[args(sorted = "false")]
+    fn ngram_indices(&self, word: &str, sorted: bool) -> PyResult<Option<Vec<NGramIndex>>> {
+        let mut indices = match self.vocab.as_ref() {
             VocabWrap::FastTextSubwordVocab(inner) => inner.ngram_indices(word),
             VocabWrap::FinalfusionSubwordVocab(inner) => inner.ngram_indices(word),
             VocabWrap::FinalfusionNGramVocab(inner) => inner.ngram_indices(word),
@@ -224,7 +228,13 @@ impl PyVocab {
                     "querying n-gram indices is not supported for this vocabulary",
                 ));
             }
-        })
+        };
+        if sorted {
+            indices.as_mut().map(|indices| indices.sort_by(|(ngram1, _), (ngram2, _)| {
+                ngram2.len().cmp(&ngram1.len())
+            }));
+        }
+        Ok(indices)
     }
 
     fn subword_indices(&self, word: &str) -> PyResult<Option<Vec<usize>>> {
