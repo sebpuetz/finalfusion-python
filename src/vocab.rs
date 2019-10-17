@@ -248,7 +248,7 @@ impl PyVocab {
         }
     }
 
-    fn max_idx(&self) -> usize {
+    fn full_len(&self) -> usize {
         self.vocab.vocab_len()
     }
 }
