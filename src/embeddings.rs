@@ -4,7 +4,6 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter};
 use std::rc::Rc;
 
-use finalfusion::chunks::metadata::Metadata;
 use finalfusion::compat::text::{ReadText, ReadTextDims};
 use finalfusion::compat::word2vec::ReadWord2Vec;
 use finalfusion::io as ffio;
@@ -17,11 +16,11 @@ use pyo3::class::iter::PyIterProtocol;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyIterator, PyTuple};
 use pyo3::{exceptions, PyMappingProtocol};
-use toml::{self, Value};
 
 use crate::norms::PyNorms;
 use crate::storage::PyStorage;
 use crate::{EmbeddingsWrap, PyEmbeddingIterator, PyVocab, PyWordSimilarity};
+use crate::metadata::PyMetadata;
 
 /// finalfusion embeddings.
 #[pyclass(name = Embeddings)]
@@ -254,48 +253,15 @@ impl PyEmbeddings {
     }
 
     /// Embeddings metadata.
-    #[getter]
-    fn metadata(&self) -> PyResult<Option<String>> {
+    fn metadata(&self) -> Option<PyMetadata> {
         let embeddings = self.embeddings.borrow();
-
-        use EmbeddingsWrap::*;
         let metadata = match &*embeddings {
-            View(e) => e.metadata(),
-            NonView(e) => e.metadata(),
+            EmbeddingsWrap::View(e) => e.metadata(),
+            EmbeddingsWrap::NonView(e) => e.metadata(),
         };
-
-        match metadata.map(|v| toml::ser::to_string_pretty(&v.0)) {
-            Some(Ok(toml)) => Ok(Some(toml)),
-            Some(Err(err)) => Err(exceptions::IOError::py_err(format!(
-                "Metadata is invalid TOML: {}",
-                err
-            ))),
-            None => Ok(None),
-        }
+        metadata.map(|metadata| PyMetadata::new(Rc::new(metadata.clone())))
     }
 
-    #[setter]
-    fn set_metadata(&mut self, metadata: &str) -> PyResult<()> {
-        let value = match metadata.parse::<Value>() {
-            Ok(value) => value,
-            Err(err) => {
-                return Err(exceptions::ValueError::py_err(format!(
-                    "Metadata is invalid TOML: {}",
-                    err
-                )));
-            }
-        };
-
-        let mut embeddings = self.embeddings.borrow_mut();
-
-        use EmbeddingsWrap::*;
-        match &mut *embeddings {
-            View(e) => e.set_metadata(Some(Metadata(value))),
-            NonView(e) => e.set_metadata(Some(Metadata(value))),
-        };
-
-        Ok(())
-    }
 
     /// Perform a similarity query.
     #[args(limit = 10)]
