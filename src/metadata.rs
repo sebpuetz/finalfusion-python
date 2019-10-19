@@ -18,7 +18,7 @@ impl PyMetadata {
         PyMetadata { metadata }
     }
 
-    pub (crate) fn metadata_(&self) -> &Metadata {
+    pub(crate) fn metadata_(&self) -> &Metadata {
         self.metadata.as_ref()
     }
 }
