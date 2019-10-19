@@ -7,7 +7,9 @@ use finalfusion::chunks::vocab::{
 };
 use finalfusion::compat::fasttext::FastTextIndexer;
 use finalfusion::prelude::*;
-use finalfusion::subword::{BucketIndexer, ExplicitIndexer, FinalfusionHashIndexer, NGrams};
+use finalfusion::subword::{
+    BucketIndexer, ExplicitIndexer, FinalfusionHashIndexer, Indexer, NGrams,
+};
 use itertools::Itertools;
 use pyo3::class::sequence::PySequenceProtocol;
 use pyo3::prelude::*;
@@ -167,6 +169,100 @@ impl PyVocab {
         Ok(PyVocab {
             vocab: Rc::new(vocab.into()),
         })
+    }
+
+    /// words(self,/,)
+    /// --
+    ///
+    /// Get the list of words stored in this vocabulary.
+    fn words(&self) -> Vec<String> {
+        self.vocab.words().into()
+    }
+
+    /// ngrams(self,/,)
+    /// --
+    ///
+    /// Get the list of ngrams explicitly stored in this vocabulary.
+    fn ngrams(&self) -> PyResult<Vec<String>> {
+        if let VocabWrap::ExplicitSubwordVocab(vocab) = self.vocab_() {
+            Ok(vocab.indexer().ngrams().into())
+        } else {
+            Err(exceptions::TypeError::py_err(
+                "this vocabulary type does not contain ngrams.",
+            ))
+        }
+    }
+
+    /// ngram_range(self,/,)
+    /// --
+    ///
+    /// Return the lower and upper bound of the length of ngrams in this vocabulary.
+    fn ngram_range(&self) -> PyResult<(u32, u32)> {
+        Ok(match self.vocab_() {
+            VocabWrap::ExplicitSubwordVocab(vocab) => (vocab.min_n(), vocab.max_n()),
+            VocabWrap::BucketSubwordVocab(vocab) => (vocab.min_n(), vocab.max_n()),
+            VocabWrap::FastTextSubwordVocab(vocab) => (vocab.min_n(), vocab.max_n()),
+            VocabWrap::SimpleVocab(_) => {
+                return Err(exceptions::TypeError::py_err(
+                    "SimpleVocab does not index ngrams.",
+                ))
+            }
+        })
+    }
+
+    /// index_ngram(self, ngram,/,)
+    /// --
+    ///
+    /// Index the given ngram.
+    fn index_ngram(&self, ngram: &str) -> PyResult<Option<u64>> {
+        Ok(match self.vocab_() {
+            VocabWrap::ExplicitSubwordVocab(vocab) => vocab.indexer().index_ngram(&ngram.into()),
+            VocabWrap::BucketSubwordVocab(vocab) => vocab.indexer().index_ngram(&ngram.into()),
+            VocabWrap::FastTextSubwordVocab(vocab) => vocab.indexer().index_ngram(&ngram.into()),
+            VocabWrap::SimpleVocab(_) => {
+                return Err(exceptions::TypeError::py_err(
+                    "SimpleVocab does not index ngrams.",
+                ))
+            }
+        })
+    }
+
+    /// word_ngrams(word,/, bracket, lower, upper)
+    /// --
+    ///
+    /// Get the ngrams in `word`.
+    ///
+    /// `lower` and `upper` set the lower and upper bound for ngram lengths.
+    /// `bracket` toggles bracketing the word with `'<'` and `'>'` before ngram extraction.
+    ///
+    /// **Note** finalfusion brackets tokens per default with `'<'` and `'>'`. When extracting
+    /// ngrams, finalfusion vocabularies will always generate ngrams with these brackets.
+    #[staticmethod]
+    #[args(bracket = "true", lower = 3, upper = 6)]
+    fn word_ngrams(word: &str, bracket: bool, lower: usize, upper: usize) -> PyResult<Vec<String>> {
+        if lower >= upper || lower == 0 {
+            return Err(exceptions::AssertionError::py_err(
+                "'lower' needs to be nonzero integer and smaller than 'upper'",
+            ));
+        }
+
+        if bracket {
+            Ok(NGrams::new(&Self::bracket(word), lower, upper)
+                .map(|s| s.to_string())
+                .collect())
+        } else {
+            Ok(NGrams::new(&Self::bracket(word), lower, upper)
+                .map(|s| s.to_string())
+                .collect())
+        }
+    }
+
+    /// full_len(self,/,)
+    /// --
+    ///
+    /// Get the full length of this vocabulary, i.e. if this vocabulary indexes subwords,
+    fn full_len(&self) -> usize {
+        self.vocab.vocab_len()
     }
 
     fn item_to_indices(&self, key: String) -> Option<PyObject> {
