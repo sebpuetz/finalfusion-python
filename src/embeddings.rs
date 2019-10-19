@@ -135,7 +135,8 @@ impl PyEmbeddings {
 
     /// Get the model's vocabulary.
     fn vocab(&self) -> PyResult<PyVocab> {
-        Ok(PyVocab::new(self.embeddings.clone()))
+        let embeddings = self.embeddings.borrow();
+        Ok(PyVocab::new(Rc::new(embeddings.vocab().clone())))
     }
 
     /// Get the model's storage.

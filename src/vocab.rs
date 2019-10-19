@@ -1,34 +1,40 @@
-use std::cell::RefCell;
+use std::ops::Deref;
 use std::rc::Rc;
 
-use finalfusion::chunks::vocab::{NGramIndices, SubwordIndices, VocabWrap, WordIndex};
+use finalfusion::chunks::vocab::{WordIndex, NGramIndices, SubwordIndices};
 use finalfusion::prelude::*;
 use pyo3::class::sequence::PySequenceProtocol;
 use pyo3::exceptions;
 use pyo3::prelude::*;
-
-use crate::EmbeddingsWrap;
 
 type NGramIndex = (String, Option<usize>);
 
 /// finalfusion vocab.
 #[pyclass(name=Vocab)]
 pub struct PyVocab {
-    embeddings: Rc<RefCell<EmbeddingsWrap>>,
+    vocab: Rc<VocabWrap>,
+}
+
+impl Deref for PyVocab {
+    type Target = VocabWrap;
+
+    fn deref(&self) -> &Self::Target {
+        self.vocab.as_ref()
+    }
 }
 
 impl PyVocab {
-    pub fn new(embeddings: Rc<RefCell<EmbeddingsWrap>>) -> Self {
-        PyVocab { embeddings }
+    pub fn new(vocab: Rc<VocabWrap>) -> Self {
+        PyVocab {
+            vocab,
+        }
     }
 }
 
 #[pymethods]
 impl PyVocab {
     fn item_to_indices(&self, key: String) -> Option<PyObject> {
-        let embeds = self.embeddings.borrow();
-
-        embeds.vocab().idx(key.as_str()).map(|idx| {
+        self.vocab.idx(key.as_str()).map(|idx| {
             let gil = pyo3::Python::acquire_gil();
             match idx {
                 WordIndex::Word(idx) => [idx].to_object(gil.python()),
@@ -38,22 +44,20 @@ impl PyVocab {
     }
 
     fn ngram_indices(&self, word: &str) -> PyResult<Option<Vec<NGramIndex>>> {
-        let embeds = self.embeddings.borrow();
-        Ok(match embeds.vocab() {
+        Ok(match self.vocab.as_ref() {
             VocabWrap::FastTextSubwordVocab(inner) => inner.ngram_indices(word),
             VocabWrap::FinalfusionSubwordVocab(inner) => inner.ngram_indices(word),
             VocabWrap::FinalfusionNGramVocab(inner) => inner.ngram_indices(word),
             VocabWrap::SimpleVocab(_) => {
                 return Err(exceptions::ValueError::py_err(
                     "querying n-gram indices is not supported for this vocabulary",
-                ))
+                ));
             }
         })
     }
 
     fn subword_indices(&self, word: &str) -> PyResult<Option<Vec<usize>>> {
-        let embeds = self.embeddings.borrow();
-        match embeds.vocab() {
+        match self.vocab.as_ref() {
             VocabWrap::FastTextSubwordVocab(inner) => Ok(inner.subword_indices(word)),
             VocabWrap::FinalfusionSubwordVocab(inner) => Ok(inner.subword_indices(word)),
             VocabWrap::FinalfusionNGramVocab(inner) => Ok(inner.subword_indices(word)),
@@ -67,13 +71,11 @@ impl PyVocab {
 #[pyproto]
 impl PySequenceProtocol for PyVocab {
     fn __len__(&self) -> PyResult<usize> {
-        let embeds = self.embeddings.borrow();
-        Ok(embeds.vocab().words_len())
+        Ok(self.vocab.words_len())
     }
 
     fn __getitem__(&self, idx: isize) -> PyResult<String> {
-        let embeds = self.embeddings.borrow();
-        let words = embeds.vocab().words();
+        let words = self.vocab.words();
 
         if idx >= words.len() as isize || idx < 0 {
             Err(exceptions::IndexError::py_err("list index out of range"))
@@ -83,9 +85,8 @@ impl PySequenceProtocol for PyVocab {
     }
 
     fn __contains__(&self, word: String) -> PyResult<bool> {
-        let embeds = self.embeddings.borrow();
-        Ok(embeds
-            .vocab()
+        Ok(self
+            .vocab
             .idx(&word)
             .and_then(|word_idx| word_idx.word())
             .is_some())
