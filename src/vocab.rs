@@ -11,6 +11,7 @@ type NGramIndex = (String, Option<usize>);
 
 /// finalfusion vocab.
 #[pyclass(name=Vocab)]
+#[derive(Clone)]
 pub struct PyVocab {
     vocab: Rc<VocabWrap>,
 }

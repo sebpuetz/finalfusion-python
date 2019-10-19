@@ -8,6 +8,7 @@ use toml::Value;
 
 /// finalfusion storage.
 #[pyclass(name=Metadata)]
+#[derive(Clone)]
 pub struct PyMetadata {
     metadata: Rc<Metadata>,
 }

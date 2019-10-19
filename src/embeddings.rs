@@ -32,6 +32,9 @@ pub struct PyEmbeddings {
     //    to its method scope.
     // 3. None of the methods returns borrowed embeddings.
     embeddings: Rc<RefCell<EmbeddingsWrap>>,
+    vocab: PyVocab,
+    metadata: Option<PyMetadata>,
+    norms: Option<PyNorms>,
 }
 
 #[pymethods]
@@ -54,8 +57,24 @@ impl PyEmbeddings {
                 .map(|e| Rc::new(RefCell::new(EmbeddingsWrap::NonView(e))))
                 .map_err(|err| exceptions::IOError::py_err(err.to_string()))?,
         };
+        let (vocab, norms, metadata) = {
+            let embeddings_ref = embeddings.borrow();
+            let vocab = PyVocab::new(Rc::new(embeddings_ref.vocab().clone()));
+            let norms = embeddings_ref.norms().map(|norms| PyNorms::new(Rc::new(norms.clone())));
+            let metadata = match &*embeddings_ref {
+                EmbeddingsWrap::View(e) => e.metadata(),
+                EmbeddingsWrap::NonView(e) => e.metadata(),
+            };
+            let metadata = metadata.map(|metadata| PyMetadata::new(Rc::new(metadata.clone())));
+            (vocab, norms, metadata)
+        };
 
-        obj.init(PyEmbeddings { embeddings });
+        obj.init(PyEmbeddings {
+            embeddings,
+            vocab,
+            metadata,
+            norms,
+        });
 
         Ok(())
     }
@@ -133,18 +152,19 @@ impl PyEmbeddings {
         }
     }
 
+    /// Embeddings metadata.
+    fn metadata(&self) -> Option<PyMetadata> {
+        self.metadata.clone()
+    }
+
     /// Get the model's norms.
     fn norms(&self) -> Option<PyNorms> {
-        let embeddings = self.embeddings.borrow();
-        embeddings
-            .norms()
-            .map(|norms| PyNorms::new(Rc::new(norms.clone())))
+        self.norms.clone()
     }
 
     /// Get the model's vocabulary.
-    fn vocab(&self) -> PyResult<PyVocab> {
-        let embeddings = self.embeddings.borrow();
-        Ok(PyVocab::new(Rc::new(embeddings.vocab().clone())))
+    fn vocab(&self) -> PyVocab {
+        self.vocab.clone()
     }
 
     /// Get the model's storage.
@@ -251,17 +271,6 @@ impl PyEmbeddings {
             (embedding, e.norm).into_py(gil.python())
         })
     }
-
-    /// Embeddings metadata.
-    fn metadata(&self) -> Option<PyMetadata> {
-        let embeddings = self.embeddings.borrow();
-        let metadata = match &*embeddings {
-            EmbeddingsWrap::View(e) => e.metadata(),
-            EmbeddingsWrap::NonView(e) => e.metadata(),
-        };
-        metadata.map(|metadata| PyMetadata::new(Rc::new(metadata.clone())))
-    }
-
 
     /// Perform a similarity query.
     #[args(limit = 10)]
@@ -403,7 +412,7 @@ where
 fn read_non_fifu_embeddings<R, V>(path: &str, read_embeddings: R) -> PyResult<PyEmbeddings>
 where
     R: FnOnce(&mut BufReader<File>) -> ffio::Result<Embeddings<V, NdArray>>,
-    V: Vocab,
+    V: Vocab + Clone,
     Embeddings<VocabWrap, StorageViewWrap>: From<Embeddings<V, NdArray>>,
 {
     let f = File::open(path).map_err(|err| {
@@ -414,15 +423,21 @@ where
     })?;
     let mut reader = BufReader::new(f);
 
-    let embeddings = read_embeddings(&mut reader).map_err(|err| {
+    let embeddings: Embeddings<VocabWrap, StorageViewWrap> = read_embeddings(&mut reader).map_err(|err| {
         exceptions::IOError::py_err(format!(
             "Cannot read text embeddings from '{}': {}'",
             path, err
         ))
-    })?;
+    })?.into();
+    let vocab = PyVocab::new(Rc::new(embeddings.vocab().clone()));
+    let norms = embeddings.norms().map(|norms| PyNorms::new(Rc::new(norms.clone())));
+    let metadata = embeddings.metadata().map(|metadata| PyMetadata::new(Rc::new(metadata.clone())));
 
     Ok(PyEmbeddings {
-        embeddings: Rc::new(RefCell::new(EmbeddingsWrap::View(embeddings.into()))),
+        embeddings: Rc::new(RefCell::new(EmbeddingsWrap::View(embeddings))),
+        vocab,
+        norms,
+        metadata,
     })
 }
 

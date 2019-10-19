@@ -7,6 +7,7 @@ use pyo3::{exceptions, PyResult, PySequenceProtocol};
 
 /// finalfusion storage.
 #[pyclass(name=Norms)]
+#[derive(Clone)]
 pub struct PyNorms {
     norms: Rc<NdNorms>,
 }
