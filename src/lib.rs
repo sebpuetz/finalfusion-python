@@ -5,9 +5,6 @@ use pyo3::prelude::*;
 mod embeddings;
 use embeddings::PyEmbeddings;
 
-mod embeddings_wrap;
-use embeddings_wrap::EmbeddingsWrap;
-
 mod iter;
 use iter::{PyEmbedding, PyEmbeddingIterator};
 
@@ -25,6 +22,8 @@ use vocab::PyVocab;
 
 mod storage;
 use storage::PyStorage;
+
+mod util;
 
 /// This is a Python module for using finalfusion embeddings.
 ///

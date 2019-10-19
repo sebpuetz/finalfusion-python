@@ -28,6 +28,10 @@ impl PyVocab {
     pub fn new(vocab: Rc<VocabWrap>) -> Self {
         PyVocab { vocab }
     }
+
+    pub(crate) fn vocab_(&self) -> &VocabWrap {
+        self.vocab.as_ref()
+    }
 }
 
 #[pymethods]

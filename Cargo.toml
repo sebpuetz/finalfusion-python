@@ -23,4 +23,5 @@ itertools = "0.8"
 finalfusion = { git = "https://github.com/finalfusion/finalfusion-rust" }
 ndarray = "0.13"
 numpy = "0.7"
+ordered-float = "1"
 toml = "0.5"

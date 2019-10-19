@@ -17,6 +17,10 @@ impl PyMetadata {
     pub fn new(metadata: Rc<Metadata>) -> Self {
         PyMetadata { metadata }
     }
+
+    pub (crate) fn metadata_(&self) -> &Metadata {
+        self.metadata.as_ref()
+    }
 }
 
 impl Deref for PyMetadata {
@@ -57,5 +61,4 @@ impl<'a> PyObjectProtocol<'a> for PyMetadata {
     fn __repr__(&self) -> PyResult<String> {
         Ok(self.0.to_string())
     }
-
 }

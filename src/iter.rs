@@ -1,21 +1,18 @@
-use std::cell::RefCell;
-use std::rc::Rc;
-
 use finalfusion::prelude::*;
 use numpy::{IntoPyArray, PyArray1};
 use pyo3::class::iter::PyIterProtocol;
 use pyo3::prelude::*;
 
-use crate::EmbeddingsWrap;
+use crate::embeddings::PyEmbeddings;
 
 #[pyclass(name=EmbeddingIterator)]
 pub struct PyEmbeddingIterator {
-    embeddings: Rc<RefCell<EmbeddingsWrap>>,
+    embeddings: PyEmbeddings,
     idx: usize,
 }
 
 impl PyEmbeddingIterator {
-    pub fn new(embeddings: Rc<RefCell<EmbeddingsWrap>>, idx: usize) -> Self {
+    pub fn new(embeddings: PyEmbeddings, idx: usize) -> Self {
         PyEmbeddingIterator { embeddings, idx }
     }
 }
@@ -29,13 +26,13 @@ impl PyIterProtocol for PyEmbeddingIterator {
     fn __next__(mut slf: PyRefMut<Self>) -> PyResult<Option<PyEmbedding>> {
         let slf = &mut *slf;
 
-        let embeddings = slf.embeddings.borrow();
-        let vocab = embeddings.vocab();
+        let embeddings = &slf.embeddings;
+        let vocab = embeddings.vocab_();
 
         if slf.idx < vocab.words_len() {
             let word = vocab.words()[slf.idx].to_string();
-            let embed = embeddings.storage().embedding(slf.idx);
-            let norm = embeddings.norms().map(|n| n.0[slf.idx]).unwrap_or(1.);
+            let embed = embeddings.storage_().embedding(slf.idx);
+            let norm = embeddings.norms_().map(|n| n.0[slf.idx]).unwrap_or(1.);
 
             slf.idx += 1;
 

@@ -16,6 +16,10 @@ impl PyNorms {
     pub fn new(norms: Rc<NdNorms>) -> Self {
         PyNorms { norms }
     }
+
+    pub(crate) fn norms_(&self) -> &NdNorms {
+        self.norms.as_ref()
+    }
 }
 
 impl Deref for PyNorms {
