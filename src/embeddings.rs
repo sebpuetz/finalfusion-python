@@ -19,6 +19,7 @@ use pyo3::types::{PyAny, PyIterator, PyTuple};
 use pyo3::{exceptions, PyMappingProtocol};
 use toml::{self, Value};
 
+use crate::norms::PyNorms;
 use crate::storage::PyStorage;
 use crate::{EmbeddingsWrap, PyEmbeddingIterator, PyVocab, PyWordSimilarity};
 
@@ -131,6 +132,14 @@ impl PyEmbeddings {
         } else {
             read_non_fifu_embeddings(path, |r| Embeddings::read_word2vec_binary(r))
         }
+    }
+
+    /// Get the model's norms.
+    fn norms(&self) -> Option<PyNorms> {
+        let embeddings = self.embeddings.borrow();
+        embeddings
+            .norms()
+            .map(|norms| PyNorms::new(Rc::new(norms.clone())))
     }
 
     /// Get the model's vocabulary.

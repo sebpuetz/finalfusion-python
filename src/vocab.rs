@@ -1,7 +1,7 @@
 use std::ops::Deref;
 use std::rc::Rc;
 
-use finalfusion::chunks::vocab::{WordIndex, NGramIndices, SubwordIndices};
+use finalfusion::chunks::vocab::{NGramIndices, SubwordIndices, WordIndex};
 use finalfusion::prelude::*;
 use pyo3::class::sequence::PySequenceProtocol;
 use pyo3::exceptions;
@@ -25,9 +25,7 @@ impl Deref for PyVocab {
 
 impl PyVocab {
     pub fn new(vocab: Rc<VocabWrap>) -> Self {
-        PyVocab {
-            vocab,
-        }
+        PyVocab { vocab }
     }
 }
 

@@ -11,6 +11,9 @@ use embeddings_wrap::EmbeddingsWrap;
 mod iter;
 use iter::{PyEmbedding, PyEmbeddingIterator};
 
+mod norms;
+use norms::PyNorms;
+
 mod similarity;
 use similarity::PyWordSimilarity;
 
@@ -28,6 +31,7 @@ use storage::PyStorage;
 fn finalfusion(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<PyEmbeddings>()?;
     m.add_class::<PyEmbedding>()?;
+    m.add_class::<PyNorms>()?;
     m.add_class::<PyStorage>()?;
     m.add_class::<PyWordSimilarity>()?;
     m.add_class::<PyVocab>()?;
