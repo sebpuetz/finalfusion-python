@@ -211,8 +211,10 @@ impl PyEmbeddings {
         }
 
         if let Some(embedding) = embeddings.embedding(word) {
+            let embedding = embedding.to_owned();
+
             return Ok(Some(
-                embedding.into_owned().into_pyarray(gil.python()).to_owned(),
+                PyArray1::from_owned_array(gil.python(), embedding).to_owned(),
             ));
         };
         match default {

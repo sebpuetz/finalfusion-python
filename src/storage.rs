@@ -30,7 +30,7 @@ impl PyStorage {
 
         let mut array = Array2::<f32>::zeros((rows, dims));
         for idx in 0..rows {
-            array.row_mut(idx).assign(&storage.embedding(idx).as_view());
+            array.row_mut(idx).assign(&storage.embedding(idx));
         }
 
         array
