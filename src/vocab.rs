@@ -10,8 +10,8 @@ use finalfusion::prelude::*;
 use finalfusion::subword::{BucketIndexer, ExplicitIndexer, FinalfusionHashIndexer, NGrams};
 use itertools::Itertools;
 use pyo3::class::sequence::PySequenceProtocol;
-use pyo3::exceptions;
 use pyo3::prelude::*;
+use pyo3::{exceptions, PyObjectProtocol};
 
 type NGramIndex = (String, Option<usize>);
 
@@ -201,6 +201,67 @@ impl PyVocab {
                 "querying subwords' indices is not supported for this vocabulary",
             )),
         }
+    }
+}
+
+#[pyproto]
+impl PyObjectProtocol for PyVocab {
+    fn __repr__(&self) -> PyResult<String> {
+        let mut repr = String::new();
+        match self.vocab_() {
+            VocabWrap::BucketSubwordVocab(vocab) => {
+                repr.push_str("BucketSubwordVocab {\n");
+                repr.push_str(&format!("\tmin_n: {},\n", vocab.min_n()));
+                repr.push_str(&format!("\tmax_n: {},\n", vocab.max_n()));
+                repr.push_str(&format!("\tbuckets_exp: {},\n", vocab.indexer().buckets()));
+                repr.push_str(&format_index(&vocab.words(), "words"));
+            }
+            VocabWrap::FastTextSubwordVocab(vocab) => {
+                repr.push_str("FastTextVocab {\n");
+                repr.push_str(&format!("\tmin_n: {},\n", vocab.min_n()));
+                repr.push_str(&format!("\tmax_n: {},\n", vocab.max_n()));
+                repr.push_str(&format!("\tn_buckets: {},\n", vocab.indexer().buckets()));
+                repr.push_str(&format_index(&vocab.words(), "words"));
+            }
+            VocabWrap::SimpleVocab(vocab) => {
+                repr.push_str("SimpleVocab {\n");
+                repr.push_str(&format_index(&vocab.words(), "words"));
+            }
+            VocabWrap::ExplicitSubwordVocab(vocab) => {
+                repr.push_str("ExplicitSubwordVocab {\n");
+                repr.push_str(&format!("\tmin_n: {},\n", vocab.min_n()));
+                repr.push_str(&format!("\tmax_n: {},\n", vocab.max_n()));
+                repr.push_str(&format_index(&vocab.words(), "words"));
+                repr.push_str(&format_index(&vocab.indexer().ngrams(), "ngrams"));
+            }
+        }
+        repr.push('}');
+        Ok(repr)
+    }
+}
+
+fn format_index(words: &[String], name: &str) -> String {
+    if words.len() > 10 {
+        format!(
+            "\t{}: {{{},...}},\n",
+            name,
+            words
+                .iter()
+                .enumerate()
+                .take(10)
+                .map(|(idx, word)| format!("'{}': {}", word, idx))
+                .join(", ")
+        )
+    } else {
+        format!(
+            "\t{}: {{{}}},\n",
+            name,
+            words
+                .iter()
+                .enumerate()
+                .map(|(idx, word)| format!("'{}': {}", word, idx))
+                .join(", ")
+        )
     }
 }
 
