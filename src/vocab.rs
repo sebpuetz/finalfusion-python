@@ -5,7 +5,7 @@ use std::mem::size_of;
 use std::ops::Deref;
 use std::rc::Rc;
 
-use crate::io::{find_chunk, ChunkIdentifier, Header, ReadChunk, WriteChunk};
+use crate::io::{find_chunk, ChunkIdentifier, Header, WriteChunk};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use finalfusion::chunks::vocab::{
     BucketSubwordVocab, ExplicitSubwordVocab, FastTextSubwordVocab, NGramIndices, SubwordIndices,
@@ -76,28 +76,27 @@ impl PyVocab {
             ))
         })?;
         let mut reader = BufReader::new(file);
-        let header = Header::read_chunk(&mut reader)?;
-        let chunks = header.chunk_identifiers();
-        for chunk in chunks {
-            match chunk {
-                ChunkIdentifier::SimpleVocab => {
-                    obj.init(Self::read_simple_vocab(&mut reader)?);
-                    return Ok(());
-                }
-                ChunkIdentifier::BucketSubwordVocab | ChunkIdentifier::FastTextSubwordVocab => {
-                    obj.init(Self::read_bucketed_vocab(&mut reader)?);
-                    return Ok(());
-                }
-                ChunkIdentifier::ExplicitSubwordVocab => {
-                    obj.init(Self::read_explicit_vocab(&mut reader)?);
-                    return Ok(());
-                }
-                _ => continue,
+        let identifier = find_chunk(&mut reader, &[
+            ChunkIdentifier::BucketSubwordVocab,
+            ChunkIdentifier::FastTextSubwordVocab,
+            ChunkIdentifier::SimpleVocab,
+            ChunkIdentifier::ExplicitSubwordVocab])?;
+
+        match identifier {
+            ChunkIdentifier::SimpleVocab => {
+                obj.init(Self::read_simple_vocab(&mut reader)?);
+                Ok(())
             }
+            ChunkIdentifier::BucketSubwordVocab | ChunkIdentifier::FastTextSubwordVocab => {
+                obj.init(Self::read_bucketed_vocab(&mut reader)?);
+                Ok(())
+            }
+            ChunkIdentifier::ExplicitSubwordVocab => {
+                obj.init(Self::read_explicit_vocab(&mut reader)?);
+                Ok(())
+            }
+            _ => unreachable!(),
         }
-        Err(exceptions::IOError::py_err(
-            "File did not contain a vocabulary.",
-        ))
     }
 
     /// simple_vocab(words,/)
@@ -482,7 +481,6 @@ impl PyVocab {
     where
         R: Read + Seek,
     {
-        find_chunk(read, &[ChunkIdentifier::SimpleVocab])?;
         ChunkIdentifier::ensure_chunk_type(read, ChunkIdentifier::SimpleVocab)?;
 
         // Read and discard chunk length.
@@ -654,8 +652,7 @@ impl PyVocab {
     where
         R: Read + Seek,
     {
-        let identifier = find_chunk(read, &[ChunkIdentifier::ExplicitSubwordVocab])?;
-        ChunkIdentifier::ensure_chunk_type(read, identifier)?;
+        ChunkIdentifier::ensure_chunk_type(read, ChunkIdentifier::ExplicitSubwordVocab)?;
         // Read and discard chunk length.
         read.read_u64::<LittleEndian>().map_err(|e| {
             exceptions::IOError::py_err(format!("Cannot read vocabulary chunk length\n{}", e))
