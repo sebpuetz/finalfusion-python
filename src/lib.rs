@@ -8,6 +8,8 @@ use embeddings::PyEmbeddings;
 mod iter;
 use iter::{PyEmbedding, PyEmbeddingIterator};
 
+mod io;
+
 mod metadata;
 use metadata::PyMetadata;
 

@@ -1,9 +1,15 @@
 use std::collections::HashSet;
+use std::fs::File;
+use std::io::{BufReader, BufWriter, Read, Seek, Write};
+use std::mem::size_of;
 use std::ops::Deref;
 use std::rc::Rc;
 
+use crate::io::{find_chunk, ChunkIdentifier, Header, ReadChunk, WriteChunk};
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use finalfusion::chunks::vocab::{
-    BucketSubwordVocab, FastTextSubwordVocab, NGramIndices, SubwordIndices, WordIndex,
+    BucketSubwordVocab, ExplicitSubwordVocab, FastTextSubwordVocab, NGramIndices, SubwordIndices,
+    WordIndex,
 };
 use finalfusion::compat::fasttext::FastTextIndexer;
 use finalfusion::prelude::*;
@@ -61,6 +67,39 @@ fn check_duplicates(l: &[String], msg: impl Into<String>) -> PyResult<()> {
 
 #[pymethods]
 impl PyVocab {
+    #[new]
+    fn __new__(obj: &PyRawObject, filename: &str) -> PyResult<()> {
+        let file = File::open(filename).map_err(|e| {
+            exceptions::IOError::py_err(format!(
+                "Could not open the file for reading: {}\n{}",
+                filename, e
+            ))
+        })?;
+        let mut reader = BufReader::new(file);
+        let header = Header::read_chunk(&mut reader)?;
+        let chunks = header.chunk_identifiers();
+        for chunk in chunks {
+            match chunk {
+                ChunkIdentifier::SimpleVocab => {
+                    obj.init(Self::read_simple_vocab(&mut reader)?);
+                    return Ok(());
+                }
+                ChunkIdentifier::BucketSubwordVocab | ChunkIdentifier::FastTextSubwordVocab => {
+                    obj.init(Self::read_bucketed_vocab(&mut reader)?);
+                    return Ok(());
+                }
+                ChunkIdentifier::ExplicitSubwordVocab => {
+                    obj.init(Self::read_explicit_vocab(&mut reader)?);
+                    return Ok(());
+                }
+                _ => continue,
+            }
+        }
+        Err(exceptions::IOError::py_err(
+            "File did not contain a vocabulary.",
+        ))
+    }
+
     /// simple_vocab(words,/)
     /// --
     ///
@@ -265,6 +304,23 @@ impl PyVocab {
         self.vocab.vocab_len()
     }
 
+    /// write(self, filename,/,)
+    /// --
+    ///
+    /// Write the vocabulary in finalfusion format to the given file.
+    fn write(&self, filename: &str) -> PyResult<()> {
+        let file = File::create(filename).map_err(|e| {
+            exceptions::IOError::py_err(format!(
+                "Could not open the file for writing: {}\n{}",
+                filename, e
+            ))
+        })?;
+        let mut writer = BufWriter::new(file);
+        let header = Header::new(vec![self.into()]);
+        header.write_chunk(&mut writer)?;
+        self.write_chunk(&mut writer)
+    }
+
     fn item_to_indices(&self, key: String) -> Option<PyObject> {
         self.vocab.idx(key.as_str()).map(|idx| {
             let gil = pyo3::Python::acquire_gil();
@@ -384,4 +440,349 @@ impl PySequenceProtocol for PyVocab {
             .and_then(|word_idx| word_idx.word())
             .is_some())
     }
+}
+
+impl<'a> From<&'a PyVocab> for ChunkIdentifier {
+    fn from(vocab: &'a PyVocab) -> Self {
+        use VocabWrap::*;
+        match vocab.vocab_() {
+            SimpleVocab(_) => ChunkIdentifier::SimpleVocab,
+            BucketSubwordVocab(_) => ChunkIdentifier::BucketSubwordVocab,
+            FastTextSubwordVocab(_) => ChunkIdentifier::FastTextSubwordVocab,
+            ExplicitSubwordVocab(_) => ChunkIdentifier::ExplicitSubwordVocab,
+        }
+    }
+}
+
+impl WriteChunk for PyVocab {
+    fn chunk_identifier(&self) -> ChunkIdentifier {
+        self.into()
+    }
+
+    fn write_chunk<W>(&self, write: &mut W) -> PyResult<()>
+    where
+        W: Write,
+    {
+        use VocabWrap::*;
+        match self.vocab_() {
+            BucketSubwordVocab(vocab) => {
+                Self::write_bucketed_vocab(write, vocab, ChunkIdentifier::BucketSubwordVocab)
+            }
+            SimpleVocab(vocab) => Self::write_simple_vocab(write, vocab),
+            ExplicitSubwordVocab(vocab) => Self::write_ngram_chunk(vocab, write),
+            FastTextSubwordVocab(vocab) => {
+                Self::write_bucketed_vocab(write, vocab, ChunkIdentifier::FastTextSubwordVocab)
+            }
+        }
+    }
+}
+
+impl PyVocab {
+    fn read_simple_vocab<R>(read: &mut R) -> PyResult<Self>
+    where
+        R: Read + Seek,
+    {
+        find_chunk(read, &[ChunkIdentifier::SimpleVocab])?;
+        ChunkIdentifier::ensure_chunk_type(read, ChunkIdentifier::SimpleVocab)?;
+
+        // Read and discard chunk length.
+        read.read_u64::<LittleEndian>().map_err(|e| {
+            exceptions::IOError::py_err(format!("Cannot read vocabulary chunk length\n{}", e))
+        })?;
+
+        let vocab_len = read.read_u64::<LittleEndian>().map_err(|e| {
+            exceptions::IOError::py_err(format!("Cannot read vocabulary length\n{}", e))
+        })? as usize;
+
+        let words = read_vocab_items(read, vocab_len)?;
+
+        Ok(PyVocab::new(Rc::new(SimpleVocab::new(words).into())))
+    }
+
+    fn write_simple_vocab<W>(write: &mut W, vocab: &SimpleVocab) -> PyResult<()>
+    where
+        W: Write,
+    {
+        let chunk_len = size_of::<u64>()
+            + vocab
+                .words()
+                .iter()
+                .map(|w| w.len() + size_of::<u32>())
+                .sum::<usize>();
+
+        write
+            .write_u32::<LittleEndian>(ChunkIdentifier::SimpleVocab as u32)
+            .map_err(|e| {
+                exceptions::IOError::py_err(format!(
+                    "Cannot write vocabulary chunk identifier\n{}",
+                    e
+                ))
+            })?;
+        write
+            .write_u64::<LittleEndian>(chunk_len as u64)
+            .map_err(|e| {
+                exceptions::IOError::py_err(format!("Cannot write vocabulary chunk length\n{}", e))
+            })?;
+        write
+            .write_u64::<LittleEndian>(vocab.words().len() as u64)
+            .map_err(|e| {
+                exceptions::IOError::py_err(format!("Cannot write vocabulary length\n{}", e))
+            })?;
+
+        write_vocab_items(write, vocab.words())?;
+
+        Ok(())
+    }
+
+    fn read_bucketed_vocab<R>(read: &mut R) -> PyResult<Self>
+    where
+        R: Read + Seek,
+    {
+        let identifier = find_chunk(
+            read,
+            &[
+                ChunkIdentifier::BucketSubwordVocab,
+                ChunkIdentifier::BucketSubwordVocab,
+            ],
+        )?;
+        ChunkIdentifier::ensure_chunk_type(read, identifier)?;
+        // Read and discard chunk length.
+        read.read_u64::<LittleEndian>().map_err(|e| {
+            exceptions::IOError::py_err(format!("Cannot read vocabulary chunk length\n{}", e))
+        })?;
+
+        let vocab_len = read.read_u64::<LittleEndian>().map_err(|e| {
+            exceptions::IOError::py_err(format!("Cannot read vocabulary length\n{}", e))
+        })? as usize;
+        let min_n = read.read_u32::<LittleEndian>().map_err(|e| {
+            exceptions::IOError::py_err(format!("Cannot read minimum n-gram length\n{}", e))
+        })?;
+        let max_n = read.read_u32::<LittleEndian>().map_err(|e| {
+            exceptions::IOError::py_err(format!("Cannot read maximum n-gram length\n{}", e))
+        })?;
+        let buckets = read.read_u32::<LittleEndian>().map_err(|e| {
+            exceptions::IOError::py_err(format!("Cannot read number of buckets\n{}", e))
+        })?;
+
+        let words = read_vocab_items(read, vocab_len as usize)?;
+        match identifier {
+            ChunkIdentifier::BucketSubwordVocab => {
+                let indexer = FinalfusionHashIndexer::new(buckets as usize);
+                let vocab = BucketSubwordVocab::new(words, min_n, max_n, indexer).into();
+                Ok(PyVocab::new(Rc::new(vocab)))
+            }
+            ChunkIdentifier::FastTextSubwordVocab => {
+                let indexer = FastTextIndexer::new(buckets as usize);
+                let vocab = FastTextSubwordVocab::new(words, min_n, max_n, indexer).into();
+                Ok(PyVocab::new(Rc::new(vocab)))
+            }
+            id => Err(exceptions::ValueError::py_err(format!(
+                "Expected one of [{}, {}], but got {}",
+                ChunkIdentifier::BucketSubwordVocab,
+                ChunkIdentifier::FastTextSubwordVocab,
+                id
+            ))),
+        }
+    }
+
+    fn write_bucketed_vocab<I, W>(
+        write: &mut W,
+        vocab: &SubwordVocab<I>,
+        identifier: ChunkIdentifier,
+    ) -> PyResult<()>
+    where
+        I: BucketIndexer,
+        W: Write,
+    {
+        // Chunk size: vocab size (u64), minimum n-gram length (u32),
+        // maximum n-gram length (u32), bucket exponent (u32), for
+        // each word: word length in bytes (u32), word bytes
+        // (variable-length).
+        let chunk_len = size_of::<u64>()
+            + size_of::<u32>()
+            + size_of::<u32>()
+            + size_of::<u32>()
+            + vocab
+                .words()
+                .iter()
+                .map(|w| w.len() + size_of::<u32>())
+                .sum::<usize>();
+
+        write
+            .write_u32::<LittleEndian>(identifier as u32)
+            .map_err(|e| {
+                exceptions::IOError::py_err(format!(
+                    "Cannot write subword vocabulary chunk identifier\n{}",
+                    e
+                ))
+            })?;
+        write
+            .write_u64::<LittleEndian>(chunk_len as u64)
+            .map_err(|e| {
+                exceptions::IOError::py_err(format!(
+                    "Cannot write subword vocabulary chunk length\n{}",
+                    e
+                ))
+            })?;
+        write
+            .write_u64::<LittleEndian>(vocab.words().len() as u64)
+            .map_err(|e| {
+                exceptions::IOError::py_err(format!("Cannot write vocabulary length\n{}", e))
+            })?;
+        write
+            .write_u32::<LittleEndian>(vocab.min_n())
+            .map_err(|e| {
+                exceptions::IOError::py_err(format!("Cannot write minimum n-gram length\n{}", e))
+            })?;
+        write
+            .write_u32::<LittleEndian>(vocab.max_n())
+            .map_err(|e| {
+                exceptions::IOError::py_err(format!("Cannot write maximum n-gram length\n{}", e))
+            })?;
+        write
+            .write_u32::<LittleEndian>(vocab.indexer().buckets() as u32)
+            .map_err(|e| {
+                exceptions::IOError::py_err(format!("Cannot write number of buckets\n{}", e))
+            })?;
+
+        write_vocab_items(write, vocab.words())?;
+
+        Ok(())
+    }
+
+    fn read_explicit_vocab<R>(read: &mut R) -> PyResult<Self>
+    where
+        R: Read + Seek,
+    {
+        let identifier = find_chunk(read, &[ChunkIdentifier::ExplicitSubwordVocab])?;
+        ChunkIdentifier::ensure_chunk_type(read, identifier)?;
+        // Read and discard chunk length.
+        read.read_u64::<LittleEndian>().map_err(|e| {
+            exceptions::IOError::py_err(format!("Cannot read vocabulary chunk length\n{}", e))
+        })?;
+
+        let words_len = read.read_u64::<LittleEndian>().map_err(|e| {
+            exceptions::IOError::py_err(format!("Cannot read vocabulary length\n{}", e))
+        })? as usize;
+        let ngrams_len = read.read_u64::<LittleEndian>().map_err(|e| {
+            exceptions::IOError::py_err(format!("Cannot read number of ngrams\n{}", e))
+        })?;
+        let min_n = read.read_u32::<LittleEndian>().map_err(|e| {
+            exceptions::IOError::py_err(format!("Cannot read minimum n-gram length\n{}", e))
+        })?;
+        let max_n = read.read_u32::<LittleEndian>().map_err(|e| {
+            exceptions::IOError::py_err(format!("Cannot read maximum n-gram length\n{}", e))
+        })?;
+
+        let words = read_vocab_items(read, words_len as usize)?;
+        let ngrams = read_vocab_items(read, ngrams_len as usize)?;
+        let indexer = ExplicitIndexer::new(ngrams);
+        let vocab = ExplicitSubwordVocab::new(words, min_n, max_n, indexer).into();
+        Ok(PyVocab::new(Rc::new(vocab)))
+    }
+
+    fn write_ngram_chunk<W>(vocab: &ExplicitSubwordVocab, write: &mut W) -> PyResult<()>
+    where
+        W: Write,
+    {
+        // Chunk size: word vocab size (u64), ngram vocab size (u64)
+        // minimum n-gram length (u32), maximum n-gram length (u32),
+        // for each word and ngram:
+        // length in bytes (u32), number of bytes (variable-length).
+        let chunk_len = size_of::<u64>()
+            + size_of::<u64>()
+            + size_of::<u32>()
+            + size_of::<u32>()
+            + vocab
+                .words()
+                .iter()
+                .map(|w| w.len() + size_of::<u32>())
+                .sum::<usize>()
+            + vocab
+                .indexer()
+                .ngrams()
+                .iter()
+                .map(|ngram| ngram.len() + size_of::<u32>())
+                .sum::<usize>();
+
+        write
+            .write_u32::<LittleEndian>(ChunkIdentifier::ExplicitSubwordVocab as u32)
+            .map_err(|e| {
+                exceptions::IOError::py_err(format!(
+                    "Cannot write subword vocabulary chunk identifier\n{}",
+                    e
+                ))
+            })?;
+        write
+            .write_u64::<LittleEndian>(chunk_len as u64)
+            .map_err(|e| {
+                exceptions::IOError::py_err(format!(
+                    "Cannot write subword vocabulary chunk length\n{}",
+                    e
+                ))
+            })?;
+        write
+            .write_u64::<LittleEndian>(vocab.words().len() as u64)
+            .map_err(|e| {
+                exceptions::IOError::py_err(format!("Cannot write vocabulary length\n{}", e))
+            })?;
+        write
+            .write_u64::<LittleEndian>(vocab.indexer().ngrams().len() as u64)
+            .map_err(|e| {
+                exceptions::IOError::py_err(format!("Cannot write ngram length\n{}", e))
+            })?;
+        write
+            .write_u32::<LittleEndian>(vocab.min_n())
+            .map_err(|e| {
+                exceptions::IOError::py_err(format!("Cannot write minimum n-gram length\n{}", e))
+            })?;
+        write
+            .write_u32::<LittleEndian>(vocab.max_n())
+            .map_err(|e| {
+                exceptions::IOError::py_err(format!("Cannot write maximum n-gram length\n{}", e))
+            })?;
+
+        write_vocab_items(write, vocab.words())?;
+        write_vocab_items(write, vocab.indexer().ngrams())?;
+
+        Ok(())
+    }
+}
+
+fn read_vocab_items<R>(read: &mut R, len: usize) -> PyResult<Vec<String>>
+where
+    R: Read,
+{
+    let mut items = Vec::with_capacity(len);
+    for _ in 0..len {
+        let item_len = read
+            .read_u32::<LittleEndian>()
+            .map_err(|e| exceptions::IOError::py_err(format!("Cannot read item length\n{}", e)))?
+            as usize;
+        let mut bytes = vec![0; item_len];
+        read.read_exact(&mut bytes)
+            .map_err(|e| exceptions::IOError::py_err(format!("Cannot read item\n{}", e)))?;
+        let item = String::from_utf8(bytes).map_err(|e| {
+            exceptions::IOError::py_err(format!("Item contains invalid UTF-8: {}", e))
+        })?;
+        items.push(item);
+    }
+    Ok(items)
+}
+
+fn write_vocab_items<W>(write: &mut W, items: &[String]) -> PyResult<()>
+where
+    W: Write,
+{
+    for word in items {
+        write
+            .write_u32::<LittleEndian>(word.len() as u32)
+            .map_err(|e| {
+                exceptions::IOError::py_err(format!("Cannot write token length\n{}", e))
+            })?;
+        write
+            .write_all(word.as_bytes())
+            .map_err(|e| exceptions::IOError::py_err(format!("Cannot write token\n{}", e)))?;
+    }
+    Ok(())
 }
