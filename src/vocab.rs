@@ -319,7 +319,7 @@ impl PyVocab {
             ))
         })?;
         let mut writer = BufWriter::new(file);
-        let header = Header::new(vec![self.into()]);
+        let header = Header::new(vec![self.chunk_identifier()]);
         header.write_chunk(&mut writer)?;
         self.write_chunk(&mut writer)
     }
@@ -445,8 +445,8 @@ impl PySequenceProtocol for PyVocab {
     }
 }
 
-impl<'a> From<&'a PyVocab> for ChunkIdentifier {
-    fn from(vocab: &'a PyVocab) -> Self {
+impl WriteChunk for PyVocab {
+    fn chunk_identifier(&self) -> ChunkIdentifier {
         use VocabWrap::*;
         match vocab.vocab_() {
             SimpleVocab(_) => ChunkIdentifier::SimpleVocab,
@@ -454,12 +454,6 @@ impl<'a> From<&'a PyVocab> for ChunkIdentifier {
             FastTextSubwordVocab(_) => ChunkIdentifier::FastTextSubwordVocab,
             ExplicitSubwordVocab(_) => ChunkIdentifier::ExplicitSubwordVocab,
         }
-    }
-}
-
-impl WriteChunk for PyVocab {
-    fn chunk_identifier(&self) -> ChunkIdentifier {
-        self.into()
     }
 
     fn write_chunk<W>(&self, write: &mut W) -> PyResult<()>
