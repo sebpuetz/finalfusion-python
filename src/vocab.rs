@@ -76,11 +76,15 @@ impl PyVocab {
             ))
         })?;
         let mut reader = BufReader::new(file);
-        let identifier = find_chunk(&mut reader, &[
-            ChunkIdentifier::BucketSubwordVocab,
-            ChunkIdentifier::FastTextSubwordVocab,
-            ChunkIdentifier::SimpleVocab,
-            ChunkIdentifier::ExplicitSubwordVocab])?;
+        let identifier = find_chunk(
+            &mut reader,
+            &[
+                ChunkIdentifier::BucketSubwordVocab,
+                ChunkIdentifier::FastTextSubwordVocab,
+                ChunkIdentifier::SimpleVocab,
+                ChunkIdentifier::ExplicitSubwordVocab,
+            ],
+        )?;
 
         match identifier {
             ChunkIdentifier::SimpleVocab => {

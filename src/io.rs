@@ -4,6 +4,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use itertools::Itertools;
 use pyo3::{exceptions, PyResult};
+use std::mem::size_of;
 
 const MODEL_VERSION: u32 = 0;
 
@@ -80,6 +81,49 @@ impl Display for ChunkIdentifier {
     }
 }
 
+/// Trait defining identifiers for data types.
+pub trait TypeId {
+    /// Read and ensure that the data type is equal to `Self`.
+    fn ensure_data_type<R>(read: &mut R) -> PyResult<()>
+    where
+        R: Read;
+
+    /// Get this data type's identifier.
+    fn type_id() -> u32;
+}
+
+macro_rules! typeid_impl {
+    ($type:ty, $id:expr) => {
+        impl TypeId for $type {
+            fn ensure_data_type<R>(read: &mut R) -> PyResult<()>
+            where
+                R: Read,
+            {
+                let type_id = read.read_u32::<LittleEndian>().map_err(|e| {
+                    exceptions::IOError::py_err(format!("Cannot read type identifier\n{}", e))
+                })?;
+                if type_id != Self::type_id() {
+                    return Err(exceptions::ValueError::py_err(format!(
+                        "Invalid type, expected: {}, got: {}",
+                        Self::type_id(),
+                        type_id
+                    )));
+                }
+
+                Ok(())
+            }
+
+            fn type_id() -> u32 {
+                $id
+            }
+        }
+    };
+}
+
+// floats starting at 10 to leave room for other integer types.
+typeid_impl!(f32, 10);
+typeid_impl!(u8, 1);
+
 pub trait ReadChunk: Sized {
     fn read_chunk<R>(read: &mut R) -> PyResult<Self>
     where
@@ -90,7 +134,7 @@ pub trait WriteChunk {
     fn chunk_identifier(&self) -> ChunkIdentifier;
     fn write_chunk<W>(&self, write: &mut W) -> PyResult<()>
     where
-        W: Write;
+        W: Write + Seek;
 }
 
 pub(crate) fn find_chunk<R>(
@@ -166,6 +210,7 @@ impl Header {
         }
     }
 
+    #[allow(dead_code)]
     pub fn chunk_identifiers(&self) -> &[ChunkIdentifier] {
         &self.chunk_identifiers
     }
@@ -250,4 +295,9 @@ impl ReadChunk for Header {
 
         Ok(Header { chunk_identifiers })
     }
+}
+
+pub fn padding<T>(pos: u64) -> u64 {
+    let size = size_of::<T>() as u64;
+    size - (pos % size)
 }

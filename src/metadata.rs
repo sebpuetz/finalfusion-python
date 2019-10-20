@@ -45,7 +45,7 @@ impl PyMetadata {
             }
         };
         obj.init(PyMetadata {
-            metadata: Rc::new(Metadata(value)),
+            metadata: Rc::new(value.into()),
         });
         Ok(())
     }
@@ -54,11 +54,11 @@ impl PyMetadata {
 #[pyproto]
 impl<'a> PyObjectProtocol<'a> for PyMetadata {
     fn __str__(&self) -> PyResult<String> {
-        Ok(toml::ser::to_string_pretty(&self.0)
+        Ok(toml::ser::to_string_pretty(self.metadata.as_ref().deref())
             .map_err(|e| exceptions::IOError::py_err(format!("Metadata is invalid TOML: {}", e)))?)
     }
 
     fn __repr__(&self) -> PyResult<String> {
-        Ok(self.0.to_string())
+        Ok(self.to_string())
     }
 }

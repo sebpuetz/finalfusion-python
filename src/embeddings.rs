@@ -62,7 +62,7 @@ impl PyEmbeddings {
         match self.vocab.idx(word)? {
             WordIndex::Word(idx) => Some((
                 self.storage.embedding(idx),
-                self.norms().map(|n| n.0[idx]).unwrap_or(1.),
+                self.norms().map(|n| n[idx]).unwrap_or(1.),
             )),
             WordIndex::Subword(indices) => {
                 let mut embed = Array1::zeros((self.storage.shape().1,));
@@ -383,7 +383,7 @@ impl PyEmbeddings {
         let metadata = self.metadata_().cloned();
         let norms = self.norms_().cloned().unwrap_or_else(|| {
             let norms = Array1::ones([self.vocab_().words_len()]);
-            NdNorms(norms)
+            NdNorms::new(norms)
         });
 
         Embeddings::new(metadata, vocab, NdArray::new(storage), norms)

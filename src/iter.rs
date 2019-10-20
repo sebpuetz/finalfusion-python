@@ -32,7 +32,7 @@ impl PyIterProtocol for PyEmbeddingIterator {
         if slf.idx < vocab.words_len() {
             let word = vocab.words()[slf.idx].to_string();
             let embed = embeddings.storage_().embedding(slf.idx);
-            let norm = embeddings.norms_().map(|n| n.0[slf.idx]).unwrap_or(1.);
+            let norm = embeddings.norms_().map(|n| n[slf.idx]).unwrap_or(1.);
 
             slf.idx += 1;
 
