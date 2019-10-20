@@ -84,7 +84,9 @@ impl PyNorms {
                 filename, e
             ))
         })?;
-        obj.init(Self::read(&mut BufReader::new(file))?);
+        let mut read = BufReader::new(file);
+        find_chunk(&mut read, &[ChunkIdentifier::NdNorms])?;
+        obj.init(Self::read(&mut read)?);
         Ok(())
     }
 
