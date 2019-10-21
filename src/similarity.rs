@@ -1,12 +1,15 @@
-use crate::embeddings::PyEmbeddings;
-use crate::util::l2_normalize;
-use finalfusion::prelude::*;
+use std::collections::{BinaryHeap, HashSet};
+
 use finalfusion::similarity::*;
 use ndarray::{s, Array1, ArrayView1, ArrayView2, CowArray, Ix1};
 use ordered_float::NotNan;
 use pyo3::class::basic::PyObjectProtocol;
 use pyo3::prelude::*;
-use std::collections::{BinaryHeap, HashSet};
+
+use crate::embeddings::PyEmbeddings;
+use crate::storage::StorageWrap;
+use crate::util::l2_normalize;
+use finalfusion::prelude::{StorageView, Vocab};
 
 impl Analogy for PyEmbeddings {
     fn analogy_masked(
@@ -168,9 +171,15 @@ impl SimilarityPrivate for PyEmbeddings {
     where
         F: FnMut(ArrayView2<f32>, ArrayView1<f32>) -> Array1<f32>,
     {
+        let storage = self
+            .storage_()
+            .expect("Storage is required for similarity queries.");
+        let vocab = self
+            .vocab_()
+            .expect("Storage is required for similarity queries.");
         use StorageWrap::*;
-        let view = match self.storage_() {
-            MmapQuantizedArray(_) | QuantizedArray(_) => {
+        let view = match storage {
+            MmapQuantizedArray | QuantizedArray(_) => {
                 unreachable!("This similarity fn should not be reachable.")
             }
             MmapArray(array) => array.view(),
@@ -179,14 +188,11 @@ impl SimilarityPrivate for PyEmbeddings {
 
         // ndarray#474
         #[allow(clippy::deref_addrof)]
-        let sims = similarity(
-            view.slice(s![0..self.vocab_().words_len(), ..]),
-            embed.view(),
-        );
+        let sims = similarity(view.slice(s![0..vocab.words_len(), ..]), embed.view());
 
         let mut results = BinaryHeap::with_capacity(limit);
         for (idx, &sim) in sims.iter().enumerate() {
-            let word = &self.vocab_().words()[idx];
+            let word = &vocab.words()[idx];
 
             // Don't add words that we are explicitly asked to skip.
             if skip.contains(word.as_str()) {

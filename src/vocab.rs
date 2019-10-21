@@ -5,12 +5,9 @@ use std::mem::size_of;
 use std::ops::Deref;
 use std::rc::Rc;
 
-use crate::io::{find_chunk, ChunkIdentifier, Header, WriteChunk};
+use crate::io::{find_chunk, ChunkIdentifier, Header, ReadChunk, WriteChunk};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use finalfusion::chunks::vocab::{
-    BucketSubwordVocab, ExplicitSubwordVocab, FastTextSubwordVocab, NGramIndices, SubwordIndices,
-    WordIndex,
-};
+use finalfusion::chunks::vocab::{BucketSubwordVocab, ExplicitSubwordVocab, FastTextSubwordVocab, NGramIndices, SubwordIndices, WordIndex, SubwordVocab};
 use finalfusion::compat::fasttext::FastTextIndexer;
 use finalfusion::prelude::*;
 use finalfusion::subword::{
@@ -20,6 +17,7 @@ use itertools::Itertools;
 use pyo3::class::sequence::PySequenceProtocol;
 use pyo3::prelude::*;
 use pyo3::{exceptions, PyObjectProtocol};
+use std::iter;
 
 type NGramIndex = (String, Option<usize>);
 
@@ -54,6 +52,59 @@ impl PyVocab {
         bracketed.push('>');
         bracketed
     }
+
+    pub(crate) fn repr_(&self, start: usize) -> String {
+        let padding = if start != 0 {
+            start + 4 - (start + 4) % 4
+        } else {
+            0
+        };
+        let mut repr = iter::repeat(" ").take(padding - start).collect::<String>();
+        let level2_padding = iter::repeat(" ").take(padding + 4).collect::<String>();
+        match self.vocab_() {
+            VocabWrap::BucketSubwordVocab(vocab) => {
+                repr += "BucketSubwordVocab {\n";
+                repr += &format!("{}min_n: {},\n", level2_padding, vocab.min_n());
+                repr += &format!("{}max_n: {},\n", level2_padding, vocab.max_n());
+                repr += &format!(
+                    "{}buckets_exp: {},\n",
+                    level2_padding,
+                    vocab.indexer().buckets()
+                );
+                repr += &level2_padding;
+                repr += &format_index(&vocab.words(), "words");
+            }
+            VocabWrap::FastTextSubwordVocab(vocab) => {
+                repr.push_str("FastTextVocab {\n");
+                repr += &format!("{}min_n: {},\n", level2_padding, vocab.min_n());
+                repr += &format!("{}max_n: {},\n", level2_padding, vocab.max_n());
+                repr += &format!(
+                    "{}buckets_exp: {},\n",
+                    level2_padding,
+                    vocab.indexer().buckets()
+                );
+                repr += &level2_padding;
+                repr += &format_index(&vocab.words(), "words");
+            }
+            VocabWrap::SimpleVocab(vocab) => {
+                repr += "SimpleVocab {\n";
+                repr += &level2_padding;
+                repr += &format_index(&vocab.words(), "words");
+            }
+            VocabWrap::ExplicitSubwordVocab(vocab) => {
+                repr += "ExplicitSubwordVocab {\n";
+                repr += &format!("{}min_n: {},\n", level2_padding, vocab.min_n());
+                repr += &format!("{}max_n: {},\n", level2_padding, vocab.max_n());
+                repr += &level2_padding;
+                repr += &format_index(&vocab.words(), "words");
+                repr += &level2_padding;
+                repr += &format_index(&vocab.indexer().ngrams(), "ngrams");
+            }
+        }
+        repr += &iter::repeat(" ").take(padding).collect::<String>();
+        repr += "}";
+        repr
+    }
 }
 
 fn check_duplicates(l: &[String], msg: impl Into<String>) -> PyResult<()> {
@@ -75,32 +126,9 @@ impl PyVocab {
                 filename, e
             ))
         })?;
-        let mut reader = BufReader::new(file);
-        let identifier = find_chunk(
-            &mut reader,
-            &[
-                ChunkIdentifier::BucketSubwordVocab,
-                ChunkIdentifier::FastTextSubwordVocab,
-                ChunkIdentifier::SimpleVocab,
-                ChunkIdentifier::ExplicitSubwordVocab,
-            ],
-        )?;
 
-        match identifier {
-            ChunkIdentifier::SimpleVocab => {
-                obj.init(Self::read_simple_vocab(&mut reader)?);
-                Ok(())
-            }
-            ChunkIdentifier::BucketSubwordVocab | ChunkIdentifier::FastTextSubwordVocab => {
-                obj.init(Self::read_bucketed_vocab(&mut reader)?);
-                Ok(())
-            }
-            ChunkIdentifier::ExplicitSubwordVocab => {
-                obj.init(Self::read_explicit_vocab(&mut reader)?);
-                Ok(())
-            }
-            _ => unreachable!(),
-        }
+        obj.init(Self::read_chunk(&mut BufReader::new(file))?);
+        Ok(())
     }
 
     /// simple_vocab(words,/)
@@ -207,7 +235,7 @@ impl PyVocab {
             (min_n as u32, max_n as u32)
         };
         let indexer = ExplicitIndexer::new(ngrams);
-        let vocab = SubwordVocab::new(words, min_n, max_n, indexer);
+        let vocab = ExplicitSubwordVocab::new(words, min_n, max_n, indexer);
         Ok(PyVocab {
             vocab: Rc::new(vocab.into()),
         })
@@ -362,43 +390,14 @@ impl PyVocab {
 #[pyproto]
 impl PyObjectProtocol for PyVocab {
     fn __repr__(&self) -> PyResult<String> {
-        let mut repr = String::new();
-        match self.vocab_() {
-            VocabWrap::BucketSubwordVocab(vocab) => {
-                repr.push_str("BucketSubwordVocab {\n");
-                repr.push_str(&format!("\tmin_n: {},\n", vocab.min_n()));
-                repr.push_str(&format!("\tmax_n: {},\n", vocab.max_n()));
-                repr.push_str(&format!("\tbuckets_exp: {},\n", vocab.indexer().buckets()));
-                repr.push_str(&format_index(&vocab.words(), "words"));
-            }
-            VocabWrap::FastTextSubwordVocab(vocab) => {
-                repr.push_str("FastTextVocab {\n");
-                repr.push_str(&format!("\tmin_n: {},\n", vocab.min_n()));
-                repr.push_str(&format!("\tmax_n: {},\n", vocab.max_n()));
-                repr.push_str(&format!("\tn_buckets: {},\n", vocab.indexer().buckets()));
-                repr.push_str(&format_index(&vocab.words(), "words"));
-            }
-            VocabWrap::SimpleVocab(vocab) => {
-                repr.push_str("SimpleVocab {\n");
-                repr.push_str(&format_index(&vocab.words(), "words"));
-            }
-            VocabWrap::ExplicitSubwordVocab(vocab) => {
-                repr.push_str("ExplicitSubwordVocab {\n");
-                repr.push_str(&format!("\tmin_n: {},\n", vocab.min_n()));
-                repr.push_str(&format!("\tmax_n: {},\n", vocab.max_n()));
-                repr.push_str(&format_index(&vocab.words(), "words"));
-                repr.push_str(&format_index(&vocab.indexer().ngrams(), "ngrams"));
-            }
-        }
-        repr.push('}');
-        Ok(repr)
+        Ok(self.repr_(0))
     }
 }
 
 fn format_index(words: &[String], name: &str) -> String {
     if words.len() > 10 {
         format!(
-            "\t{}: {{{},...}},\n",
+            "{}: {{{},...}},\n",
             name,
             words
                 .iter()
@@ -409,7 +408,7 @@ fn format_index(words: &[String], name: &str) -> String {
         )
     } else {
         format!(
-            "\t{}: {{{}}},\n",
+            "{}: {{{}}},\n",
             name,
             words
                 .iter()
@@ -448,7 +447,7 @@ impl PySequenceProtocol for PyVocab {
 impl WriteChunk for PyVocab {
     fn chunk_identifier(&self) -> ChunkIdentifier {
         use VocabWrap::*;
-        match vocab.vocab_() {
+        match self.vocab_() {
             SimpleVocab(_) => ChunkIdentifier::SimpleVocab,
             BucketSubwordVocab(_) => ChunkIdentifier::BucketSubwordVocab,
             FastTextSubwordVocab(_) => ChunkIdentifier::FastTextSubwordVocab,
@@ -470,6 +469,31 @@ impl WriteChunk for PyVocab {
             FastTextSubwordVocab(vocab) => {
                 Self::write_bucketed_vocab(write, vocab, ChunkIdentifier::FastTextSubwordVocab)
             }
+        }
+    }
+}
+
+impl ReadChunk for PyVocab {
+    fn read_chunk<R>(read: &mut R) -> Result<Self, PyErr>
+    where
+        R: Read + Seek,
+    {
+        let identifier = find_chunk(
+            read,
+            &[
+                ChunkIdentifier::BucketSubwordVocab,
+                ChunkIdentifier::FastTextSubwordVocab,
+                ChunkIdentifier::SimpleVocab,
+                ChunkIdentifier::ExplicitSubwordVocab,
+            ],
+        )?;
+        match identifier {
+            ChunkIdentifier::SimpleVocab => Self::read_simple_vocab(read),
+            ChunkIdentifier::BucketSubwordVocab | ChunkIdentifier::FastTextSubwordVocab => {
+                Self::read_bucketed_vocab(read)
+            }
+            ChunkIdentifier::ExplicitSubwordVocab => Self::read_explicit_vocab(read),
+            _ => unreachable!(),
         }
     }
 }

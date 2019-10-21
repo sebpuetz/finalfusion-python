@@ -2,6 +2,7 @@ use std::fmt::{self, Display};
 use std::io::{Read, Seek, SeekFrom, Write};
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use finalfusion::io as ffio;
 use itertools::Itertools;
 use pyo3::{exceptions, PyResult};
 use std::mem::size_of;
@@ -84,7 +85,7 @@ impl Display for ChunkIdentifier {
 /// Trait defining identifiers for data types.
 pub trait TypeId {
     /// Read and ensure that the data type is equal to `Self`.
-    fn ensure_data_type<R>(read: &mut R) -> PyResult<()>
+    fn ensure_data_type<R>(read: &mut R) -> ffio::Result<()>
     where
         R: Read;
 
@@ -95,19 +96,20 @@ pub trait TypeId {
 macro_rules! typeid_impl {
     ($type:ty, $id:expr) => {
         impl TypeId for $type {
-            fn ensure_data_type<R>(read: &mut R) -> PyResult<()>
+            fn ensure_data_type<R>(read: &mut R) -> ffio::Result<()>
             where
                 R: Read,
             {
-                let type_id = read.read_u32::<LittleEndian>().map_err(|e| {
-                    exceptions::IOError::py_err(format!("Cannot read type identifier\n{}", e))
-                })?;
+                let type_id = read
+                    .read_u32::<LittleEndian>()
+                    .map_err(|e| ffio::ErrorKind::io_error("Cannot read type identifier", e))?;
                 if type_id != Self::type_id() {
-                    return Err(exceptions::ValueError::py_err(format!(
+                    return Err(ffio::ErrorKind::Format(format!(
                         "Invalid type, expected: {}, got: {}",
                         Self::type_id(),
                         type_id
-                    )));
+                    ))
+                    .into());
                 }
 
                 Ok(())
@@ -146,17 +148,6 @@ where
 {
     read.seek(SeekFrom::Start(0))?;
     let header = Header::read_chunk(read)?;
-    if !header
-        .chunk_identifiers
-        .iter()
-        .cloned()
-        .any(|header_id| target_ids.iter().any(|&target_id| target_id == header_id))
-    {
-        return Err(exceptions::IOError::py_err(format!(
-            "Header did not contain [{}]",
-            target_ids.iter().map(|id| id.to_string()).join(", ")
-        )));
-    }
     for &id in header.chunk_identifiers.iter() {
         if let ChunkIdentifier::Header = id {
             return Err(exceptions::IOError::py_err(
@@ -181,8 +172,6 @@ where
     let identifier = read.read_u32::<LittleEndian>().map_err(|e| {
         exceptions::IOError::py_err(format!("Cannot read chunk identifier.\n{}", e))
     })?;
-    println!("{}", ChunkIdentifier::try_from(identifier).unwrap());
-    println!("{}", skip_id);
     if identifier != skip_id as u32 {
         return Err(exceptions::IOError::py_err(
             "Chunks are not in header-specified order.",

@@ -1,6 +1,7 @@
 use finalfusion::prelude::*;
 use numpy::{IntoPyArray, PyArray1};
 use pyo3::class::iter::PyIterProtocol;
+use pyo3::exceptions;
 use pyo3::prelude::*;
 
 use crate::embeddings::PyEmbeddings;
@@ -27,12 +28,23 @@ impl PyIterProtocol for PyEmbeddingIterator {
         let slf = &mut *slf;
 
         let embeddings = &slf.embeddings;
-        let vocab = embeddings.vocab_();
+        let vocab = if let Some(vocab) = embeddings.vocab_() {
+            vocab
+        } else {
+            return Err(exceptions::TypeError::py_err(
+                "Can't iterate over embeddings without vocab.",
+            ));
+        };
 
         if slf.idx < vocab.words_len() {
             let word = vocab.words()[slf.idx].to_string();
-            let embed = embeddings.storage_().embedding(slf.idx);
-            let norm = embeddings.norms_().map(|n| n[slf.idx]).unwrap_or(1.);
+            let embed = embeddings
+                .storage_()
+                .ok_or_else(|| {
+                    exceptions::TypeError::py_err("Can't iterate over embeddings without storage.")
+                })?
+                .embedding(slf.idx);
+            let norm = embeddings.norms_().map(|n| n[slf.idx]);
 
             slf.idx += 1;
 
@@ -52,7 +64,7 @@ impl PyIterProtocol for PyEmbeddingIterator {
 #[pyclass(name=Embedding)]
 pub struct PyEmbedding {
     embedding: Py<PyArray1<f32>>,
-    norm: f32,
+    norm: Option<f32>,
     word: String,
 }
 
@@ -73,7 +85,7 @@ impl PyEmbedding {
 
     /// Get the norm.
     #[getter]
-    pub fn get_norm(&self) -> f32 {
+    pub fn get_norm(&self) -> Option<f32> {
         self.norm
     }
 }

@@ -1,29 +1,32 @@
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
+use std::mem;
 use std::rc::Rc;
 
+use finalfusion::chunks::norms::NdNorms;
 use finalfusion::chunks::vocab::WordIndex;
-use finalfusion::compat::text::{ReadText, ReadTextDims};
-use finalfusion::compat::word2vec::ReadWord2Vec;
 use finalfusion::io as ffio;
-use finalfusion::prelude::*;
+use finalfusion::prelude::{
+    Embeddings, NdArray, ReadFastText, ReadText, ReadTextDims, ReadWord2Vec, Storage, Vocab,
+    VocabWrap,
+};
 use finalfusion::similarity::{Analogy, EmbeddingSimilarity, WordSimilarity};
 use itertools::Itertools;
 use ndarray::{Array1, CowArray, Ix1};
-use numpy::{IntoPyArray, NpyDataType, PyArray1};
+use numpy::{IntoPyArray, PyArray1};
 use pyo3::class::iter::PyIterProtocol;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyIterator, PyTuple};
-use pyo3::{exceptions, PyMappingProtocol};
+use pyo3::types::PyTuple;
+use pyo3::{exceptions, PyMappingProtocol, PyObjectProtocol};
 
+use crate::io::{ChunkIdentifier, Header, ReadChunk, WriteChunk};
 use crate::metadata::PyMetadata;
 use crate::norms::PyNorms;
 use crate::similarity::similarity_results;
-use crate::storage::PyStorage;
-use crate::util::l2_normalize;
-use crate::{PyEmbeddingIterator, PyVocab};
-use finalfusion::chunks::norms::NdNorms;
+use crate::storage::{PyStorage, StorageWrap};
+use crate::util::{l2_normalize, PyEmbedding, PyEmbeddingDefault, Skips};
+use crate::{io, PyEmbeddingIterator, PyVocab};
 
 /// finalfusion embeddings.
 #[pyclass(name = Embeddings)]
@@ -35,62 +38,107 @@ pub struct PyEmbeddings {
     // 2. The only mutable borrow (in set_metadata) is limited
     //    to its method scope.
     // 3. None of the methods returns borrowed embeddings.
-    storage: PyStorage,
-    vocab: PyVocab,
+    storage: Option<PyStorage>,
+    vocab: Option<PyVocab>,
     metadata: Option<PyMetadata>,
     norms: Option<PyNorms>,
 }
 
 impl PyEmbeddings {
+    fn empty() -> Self {
+        PyEmbeddings {
+            storage: None,
+            vocab: None,
+            metadata: None,
+            norms: None,
+        }
+    }
+
     pub(crate) fn embedding_(&self, word: &str) -> Option<CowArray<f32, Ix1>> {
-        match self.vocab.idx(word)? {
-            WordIndex::Word(idx) => Some(self.storage.embedding(idx)),
+        let vocab = self.vocab_()?;
+        let storage = self.storage_()?;
+        vocab.idx(word).map(|idx| match idx {
+            WordIndex::Word(idx) => storage.embedding(idx),
             WordIndex::Subword(indices) => {
-                let mut embed = Array1::zeros((self.storage.shape().1,));
+                let mut embed = Array1::zeros((storage.shape().1,));
                 for idx in indices {
-                    embed += &self.storage.embedding(idx).view();
+                    embed += &storage.embedding(idx).view();
                 }
 
                 l2_normalize(embed.view_mut());
 
-                Some(CowArray::from(embed))
+                CowArray::from(embed)
             }
-        }
+        })
     }
 
     pub(crate) fn embedding_with_norm_(&self, word: &str) -> Option<(CowArray<f32, Ix1>, f32)> {
-        match self.vocab.idx(word)? {
-            WordIndex::Word(idx) => Some((
-                self.storage.embedding(idx),
-                self.norms().map(|n| n[idx]).unwrap_or(1.),
-            )),
+        let storage = self.storage_()?;
+        let vocab = self.vocab_()?;
+        let norms = self.norms_()?;
+        vocab.idx(word).map(|idx| match idx {
+            WordIndex::Word(idx) => (storage.embedding(idx), norms[idx]),
             WordIndex::Subword(indices) => {
-                let mut embed = Array1::zeros((self.storage.shape().1,));
+                let mut embed = Array1::zeros((storage.shape().1,));
                 for idx in indices {
-                    embed += &self.storage.embedding(idx).view();
+                    embed += &storage.embedding(idx).view();
                 }
 
                 let norm = l2_normalize(embed.view_mut());
 
-                Some((CowArray::from(embed), norm))
+                (CowArray::from(embed), norm)
             }
-        }
+        })
     }
 
-    pub(crate) fn storage_(&self) -> &StorageWrap {
-        self.storage.storage_()
+    pub(crate) fn storage_(&self) -> Option<&StorageWrap> {
+        self.storage.as_ref().map(|s| s.storage_())
     }
 
-    pub(crate) fn vocab_(&self) -> &VocabWrap {
-        self.vocab.vocab_()
-    }
-
-    pub(crate) fn metadata_(&self) -> Option<&Metadata> {
-        self.metadata.as_ref().map(|metadata| metadata.metadata_())
+    pub(crate) fn vocab_(&self) -> Option<&VocabWrap> {
+        self.vocab.as_ref().map(|v| v.vocab_())
     }
 
     pub(crate) fn norms_(&self) -> Option<&NdNorms> {
         self.norms.as_ref().map(|norms| norms.norms_())
+    }
+
+    fn set_storage(&mut self, storage: Option<PyStorage>) -> Option<PyStorage> {
+        mem::replace(&mut self.storage, storage)
+    }
+
+    fn set_vocab(&mut self, vocab: Option<PyVocab>) -> Option<PyVocab> {
+        mem::replace(&mut self.vocab, vocab)
+    }
+
+    fn set_norms(&mut self, norms: Option<PyNorms>) -> Option<PyNorms> {
+        mem::replace(&mut self.norms, norms)
+    }
+
+    fn set_metadata(&mut self, metadata: Option<PyMetadata>) -> Option<PyMetadata> {
+        mem::replace(&mut self.metadata, metadata)
+    }
+
+    pub(crate) fn header(&self) -> PyResult<Header> {
+        let mut chunks = vec![];
+        if self.metadata.is_some() {
+            chunks.push(ChunkIdentifier::Metadata)
+        }
+        if let Some(vocab) = self.vocab.as_ref() {
+            chunks.push(vocab.chunk_identifier())
+        }
+        if let Some(storage) = self.storage.as_ref() {
+            chunks.push(storage.chunk_identifier())
+        }
+        if let Some(norms) = self.norms.as_ref() {
+            chunks.push(norms.chunk_identifier())
+        }
+        if chunks.is_empty() {
+            return Err(exceptions::TypeError::py_err(
+                "Cannot serialize empty embeddings.",
+            ));
+        }
+        Ok(Header::new(chunks))
     }
 }
 
@@ -105,24 +153,59 @@ impl PyEmbeddings {
     #[new]
     #[args(mmap = false)]
     fn __new__(obj: &PyRawObject, path: &str, mmap: bool) -> PyResult<()> {
-        // First try to load embeddings with viewable storage. If that
-        // fails, attempt to load the embeddings as non-viewable
-        // storage.
-        let embeddings: Embeddings<VocabWrap, StorageWrap> = read_embeddings(path, mmap)
-            .map_err(|err| exceptions::IOError::py_err(err.to_string()))?;
+        let f = File::open(path).map_err(|e| {
+            exceptions::IOError::py_err(format!(
+                "Cannot open embeddings file for reading: {}\n{}",
+                path, e
+            ))
+        })?;
+        let mut reader = BufReader::new(f);
+        let header = io::Header::read_chunk(&mut reader)?;
+        let chunks = header.chunk_identifiers();
+        if chunks.is_empty() {
+            return Err(exceptions::IOError::py_err("File contains no chunks."));
+        }
+        let mut embeddings = PyEmbeddings::empty();
+        use ChunkIdentifier::*;
+        for chunk in chunks {
+            match chunk {
+                NdArray => {
+                    if mmap {
+                        embeddings.set_storage(Some(PyStorage::mmap_array(&mut reader)?));
+                    } else {
+                        embeddings.set_storage(Some(PyStorage::read_array_storage(&mut reader)?));
+                    }
+                }
+                QuantizedArray => {
+                    if mmap {
+                        return Err(exceptions::NotImplementedError::py_err(
+                            "Mmapped quantized storage is not yet implemented.",
+                        ));
+                    } else {
+                        embeddings.set_storage(Some(PyStorage::read_quantized_chunk(&mut reader)?));
+                    }
+                }
+                NdNorms => {
+                    embeddings.set_norms(Some(PyNorms::read_chunk(&mut reader)?));
+                }
+                Header => {
+                    return Err(exceptions::IOError::py_err(
+                        "File contains multiple headers.",
+                    ))
+                }
+                SimpleVocab | BucketSubwordVocab | FastTextSubwordVocab | ExplicitSubwordVocab => {
+                    embeddings.set_vocab(Some(PyVocab::read_chunk(&mut reader)?));
+                }
+                Metadata => {
+                    embeddings.set_metadata(Some(PyMetadata::read_chunk(&mut reader)?));
+                }
+            };
+        }
+        if embeddings.norms.is_none() {
+            embeddings.set_norms(Some(PyNorms::read_chunk(&mut reader)?));
+        }
 
-        let (metadata, vocab, storage, norms) = embeddings.into_parts();
-        let vocab = PyVocab::new(Rc::new(vocab));
-        let norms = norms.map(|norms| PyNorms::new(Rc::new(norms.clone())));
-        let metadata = metadata.map(|metadata| PyMetadata::new(Rc::new(metadata.clone())));
-        let storage = PyStorage::new(Rc::new(storage));
-
-        obj.init(PyEmbeddings {
-            storage,
-            vocab,
-            metadata,
-            norms,
-        });
+        obj.init(embeddings);
 
         Ok(())
     }
@@ -211,12 +294,12 @@ impl PyEmbeddings {
     }
 
     /// Get the model's vocabulary.
-    fn vocab(&self) -> PyVocab {
+    fn vocab(&self) -> Option<PyVocab> {
         self.vocab.clone()
     }
 
     /// Get the model's storage.
-    fn storage(&self) -> PyStorage {
+    fn storage(&self) -> Option<PyStorage> {
         self.storage.clone()
     }
 
@@ -234,15 +317,19 @@ impl PyEmbeddings {
         limit: usize,
         mask: (bool, bool, bool),
     ) -> PyResult<Vec<PyObject>> {
-        use StorageWrap::*;
-        match self.storage.storage_() {
-            MmapQuantizedArray(_) | QuantizedArray(_) => {
-                return Err(exceptions::ValueError::py_err(
-                    "Analogy queries are not supported for this type of embedding matrix",
-                ))
-            }
-            _ => (),
+        if self.vocab.is_none() {
+            return Err(exceptions::TypeError::py_err(
+                "Vocab is required for analogy queries.",
+            ));
         };
+        let storage = self.storage_().ok_or_else(|| {
+            exceptions::TypeError::py_err("Storage is required for analogy queries.")
+        })?;
+        if storage.quantized() {
+            return Err(exceptions::ValueError::py_err(
+                "Analogy queries are not supported for this quantized embedding matrices",
+            ));
+        }
 
         let results = self
             .analogy_masked([word1, word2, word3], [mask.0, mask.1, mask.2], limit)
@@ -278,9 +365,18 @@ impl PyEmbeddings {
         word: &str,
         default: PyEmbeddingDefault,
     ) -> PyResult<Option<Py<PyArray1<f32>>>> {
+        if self.vocab.is_none() {
+            return Err(exceptions::TypeError::py_err(
+                "Vocab is required for embedding lookup.",
+            ));
+        }
+        let (_, cols) = self.storage_().map(|s| s.shape()).ok_or_else(|| {
+            exceptions::TypeError::py_err("Storage is required for embedding lookup.")
+        })?;
+
         let gil = pyo3::Python::acquire_gil();
         if let PyEmbeddingDefault::Embedding(array) = &default {
-            if array.as_ref(gil.python()).shape()[0] != self.storage.shape().1 {
+            if array.as_ref(gil.python()).shape()[0] != cols {
                 return Err(exceptions::ValueError::py_err(format!(
                     "Invalid shape of default embedding: {}",
                     array.as_ref(gil.python()).shape()[0]
@@ -297,7 +393,7 @@ impl PyEmbeddings {
         };
         match default {
             PyEmbeddingDefault::Constant(constant) => {
-                let nd_arr = Array1::from_elem([self.storage.shape().1], constant);
+                let nd_arr = Array1::from_elem([cols], constant);
                 Ok(Some(nd_arr.into_pyarray(gil.python()).to_owned()))
             }
             PyEmbeddingDefault::Embedding(array) => Ok(Some(array)),
@@ -305,22 +401,45 @@ impl PyEmbeddings {
         }
     }
 
-    fn embedding_with_norm(&self, word: &str) -> Option<Py<PyTuple>> {
+    fn embedding_with_norm(&self, word: &str) -> PyResult<Option<Py<PyTuple>>> {
+        if self.vocab.is_none() {
+            return Err(exceptions::TypeError::py_err(
+                "Vocab is required for embedding lookup.",
+            ));
+        }
+        if self.storage.is_none() {
+            return Err(exceptions::TypeError::py_err(
+                "Storage is required for embedding lookup.",
+            ));
+        };
+
+        if self.norms_().is_none() {
+            return Err(exceptions::TypeError::py_err(
+                "Norms are required for embedding lookup with norms.",
+            ));
+        }
+
         let embedding_with_norm = self.embedding_with_norm_(word);
 
-        embedding_with_norm.map(|(embedding, norm)| {
+        Ok(embedding_with_norm.map(|(embedding, norm)| {
             let gil = pyo3::Python::acquire_gil();
             let embedding = embedding.into_owned().into_pyarray(gil.python());
             (embedding, norm).into_py(gil.python())
-        })
+        }))
     }
 
     /// Perform a similarity query.
     #[args(limit = 10)]
     fn word_similarity(&self, py: Python, word: &str, limit: usize) -> PyResult<Vec<PyObject>> {
+        let storage = self.storage_();
+        if storage.is_none() || self.vocab.is_none() {
+            return Err(exceptions::TypeError::py_err(
+                "Embeddings need to contain vocab and storage for similarity queries.",
+            ));
+        }
         use StorageWrap::*;
-        match self.storage.storage_() {
-            MmapQuantizedArray(_) | QuantizedArray(_) => {
+        match storage.unwrap() {
+            MmapQuantizedArray | QuantizedArray(_) => {
                 return Err(exceptions::ValueError::py_err(
                     "Similarity queries are not supported for this type of embedding matrix",
                 ))
@@ -342,9 +461,16 @@ impl PyEmbeddings {
         skip: Skips,
         limit: usize,
     ) -> PyResult<Vec<PyObject>> {
+        let storage = self.storage_();
+        if storage.is_none() || self.vocab.is_none() {
+            return Err(exceptions::TypeError::py_err(
+                "Embeddings need to contain vocab and storage for similarity queries.",
+            ));
+        }
+        let storage = storage.unwrap();
         use StorageWrap::*;
-        match self.storage.storage_() {
-            MmapQuantizedArray(_) | QuantizedArray(_) => {
+        match storage {
+            MmapQuantizedArray | QuantizedArray(_) => {
                 return Err(exceptions::ValueError::py_err(
                     "Similarity queries are not supported for this type of embedding matrix",
                 ))
@@ -353,11 +479,11 @@ impl PyEmbeddings {
         };
 
         let embedding = embedding.0.as_array();
-        if embedding.shape()[0] != self.storage_().shape().1 {
+        if embedding.shape()[0] != storage.shape().1 {
             return Err(exceptions::ValueError::py_err(format!(
                 "Incompatible embedding shapes: embeddings: ({},), query: ({},)",
                 embedding.shape()[0],
-                self.storage_().shape().1
+                storage.shape().1
             )));
         }
 
@@ -373,22 +499,21 @@ impl PyEmbeddings {
     fn write(&self, filename: &str) -> PyResult<()> {
         let f = File::create(filename)?;
         let mut writer = BufWriter::new(f);
-        let vocab = self.vocab_().clone();
-        let storage = match self.storage_() {
-            StorageWrap::QuantizedArray(quant) => PyStorage::copy_storage_to_array(quant.as_ref()),
-            StorageWrap::MmapQuantizedArray(quant) => PyStorage::copy_storage_to_array(quant),
-            StorageWrap::NdArray(array) => array.view().to_owned(),
-            StorageWrap::MmapArray(array) => array.view().to_owned(),
-        };
-        let metadata = self.metadata_().cloned();
-        let norms = self.norms_().cloned().unwrap_or_else(|| {
-            let norms = Array1::ones([self.vocab_().words_len()]);
-            NdNorms::new(norms)
-        });
-
-        Embeddings::new(metadata, vocab, NdArray::new(storage), norms)
-            .write_embeddings(&mut writer)
-            .map_err(|err| exceptions::IOError::py_err(err.to_string()))
+        let header = self.header()?;
+        header.write_chunk(&mut writer)?;
+        if let Some(metadata) = self.metadata.as_ref() {
+            metadata.write_chunk(&mut writer)?;
+        }
+        if let Some(vocab) = self.vocab.as_ref() {
+            vocab.write_chunk(&mut writer)?;
+        }
+        if let Some(storage) = self.storage.as_ref() {
+            storage.write_chunk(&mut writer)?;
+        }
+        if let Some(norms) = self.norms.as_ref() {
+            norms.write_chunk(&mut writer)?;
+        }
+        Ok(())
     }
 }
 
@@ -416,28 +541,42 @@ impl PyIterProtocol for PyEmbeddings {
     }
 }
 
-fn read_embeddings<S>(path: &str, mmap: bool) -> Result<Embeddings<VocabWrap, S>, ffio::Error>
-where
-    Embeddings<VocabWrap, S>: ReadEmbeddings + MmapEmbeddings,
-{
-    let f = File::open(path)
-        .map_err(|e| ffio::ErrorKind::io_error("Cannot open embeddings file for reading", e))?;
-    let mut reader = BufReader::new(f);
-
-    let embeddings = if mmap {
-        Embeddings::mmap_embeddings(&mut reader)?
-    } else {
-        Embeddings::read_embeddings(&mut reader)?
-    };
-
-    Ok(embeddings)
+#[pyproto]
+impl PyObjectProtocol for PyEmbeddings {
+    fn __repr__(&self) -> PyResult<String> {
+        let mut repr = "Embeddings {\n".to_string();
+        if let Some(vocab) = self.vocab() {
+            repr += "    vocab:";
+            repr += &vocab.repr_("    vocab:".len());
+            repr += ",\n";
+        }
+        if let Some(storage) = self.storage() {
+            let storage_str = "    storage:";
+            repr += storage_str;
+            repr += &storage.repr_(storage_str.len());
+            repr += ",\n";
+        }
+        if let Some(norms) = self.norms() {
+            let norms_str = "    norms:";
+            repr += norms_str;
+            repr += &norms.repr_(norms_str.len());
+            repr += ",\n";
+        }
+        if let Some(metadata) = self.metadata() {
+            let metadata_str = "    metadata:";
+            repr += metadata_str;
+            repr += &metadata.repr_(metadata_str.len());
+            repr += ",\n";
+        }
+        repr += "}";
+        Ok(repr)
+    }
 }
 
 fn read_non_fifu_embeddings<R, V>(path: &str, read_embeddings: R) -> PyResult<PyEmbeddings>
 where
     R: FnOnce(&mut BufReader<File>) -> ffio::Result<Embeddings<V, NdArray>>,
     V: Vocab + Clone + Into<VocabWrap>,
-    Embeddings<VocabWrap, StorageViewWrap>: From<Embeddings<V, NdArray>>,
 {
     let f = File::open(path).map_err(|err| {
         exceptions::IOError::py_err(format!(
@@ -454,8 +593,8 @@ where
         ))
     })?;
     let (metadata, vocab, storage, norms) = embeddings.into_parts();
-    let storage = PyStorage::new(Rc::new(storage.into()));
-    let vocab = PyVocab::new(Rc::new(vocab.into()));
+    let storage = Some(PyStorage::new(Rc::new(storage.into())));
+    let vocab = Some(PyVocab::new(Rc::new(vocab.into())));
     let norms = norms.map(|norms| PyNorms::new(Rc::new(norms)));
     let metadata = metadata.map(|metadata| PyMetadata::new(Rc::new(metadata)));
 
@@ -465,94 +604,4 @@ where
         norms,
         metadata,
     })
-}
-
-pub enum PyEmbeddingDefault {
-    Embedding(Py<PyArray1<f32>>),
-    Constant(f32),
-    None,
-}
-
-impl<'a> Default for PyEmbeddingDefault {
-    fn default() -> Self {
-        PyEmbeddingDefault::None
-    }
-}
-
-impl<'a> FromPyObject<'a> for PyEmbeddingDefault {
-    fn extract(ob: &'a PyAny) -> Result<Self, PyErr> {
-        if ob.is_none() {
-            return Ok(PyEmbeddingDefault::None);
-        }
-        if let Ok(emb) = ob
-            .extract()
-            .map(|e: &PyArray1<f32>| PyEmbeddingDefault::Embedding(e.to_owned()))
-        {
-            return Ok(emb);
-        }
-
-        if let Ok(constant) = ob.extract().map(PyEmbeddingDefault::Constant) {
-            return Ok(constant);
-        }
-        if let Ok(embed) = ob
-            .iter()
-            .and_then(|iter| collect_array_from_py_iter(iter, ob.len().ok()))
-            .map(PyEmbeddingDefault::Embedding)
-        {
-            return Ok(embed);
-        }
-
-        Err(exceptions::TypeError::py_err(
-            "failed to construct default value.",
-        ))
-    }
-}
-
-fn collect_array_from_py_iter(iter: PyIterator, len: Option<usize>) -> PyResult<Py<PyArray1<f32>>> {
-    let mut embed_vec = len.map(Vec::with_capacity).unwrap_or_default();
-    for item in iter {
-        let item = item.and_then(|item| item.extract())?;
-        embed_vec.push(item);
-    }
-    let gil = Python::acquire_gil();
-    let embed = PyArray1::from_vec(gil.python(), embed_vec).to_owned();
-    Ok(embed)
-}
-
-struct Skips<'a>(HashSet<&'a str>);
-
-impl<'a> FromPyObject<'a> for Skips<'a> {
-    fn extract(ob: &'a PyAny) -> Result<Self, PyErr> {
-        let mut set = ob.len().map(HashSet::with_capacity).unwrap_or_default();
-        if ob.is_none() {
-            return Ok(Skips(set));
-        }
-        for el in ob
-            .iter()
-            .map_err(|_| exceptions::TypeError::py_err("Iterable expected"))?
-        {
-            let el = el?;
-            set.insert(el.extract().map_err(|_| {
-                exceptions::TypeError::py_err(format!("Expected String not: {}", el))
-            })?);
-        }
-        Ok(Skips(set))
-    }
-}
-
-struct PyEmbedding<'a>(&'a PyArray1<f32>);
-
-impl<'a> FromPyObject<'a> for PyEmbedding<'a> {
-    fn extract(ob: &'a PyAny) -> Result<Self, PyErr> {
-        let embedding = ob
-            .downcast_ref::<PyArray1<f32>>()
-            .map_err(|_| exceptions::TypeError::py_err("Expected array with dtype Float32"))?;
-        if embedding.data_type() != NpyDataType::Float32 {
-            return Err(exceptions::TypeError::py_err(format!(
-                "Expected dtype Float32, got {:?}",
-                embedding.data_type()
-            )));
-        };
-        Ok(PyEmbedding(embedding))
-    }
 }

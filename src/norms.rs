@@ -13,7 +13,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyList};
 use pyo3::{exceptions, PyObjectProtocol, PyResult, PySequenceProtocol};
 
-use crate::io::{find_chunk, padding, ChunkIdentifier, Header, TypeId, WriteChunk};
+use crate::io::{find_chunk, padding, ChunkIdentifier, Header, ReadChunk, TypeId, WriteChunk};
+use std::iter;
 
 /// finalfusion storage.
 #[pyclass(name = Norms)]
@@ -31,38 +32,32 @@ impl PyNorms {
         self.norms.as_ref()
     }
 
-    pub(crate) fn read<R>(read: &mut R) -> PyResult<Self>
-    where
-        R: Read + Seek,
-    {
-        let identifier = find_chunk(read, &[ChunkIdentifier::NdNorms])?;
-        ChunkIdentifier::ensure_chunk_type(read, identifier)?;
-
-        // Read and discard chunk length.
-        read.read_u64::<LittleEndian>().map_err(|e| {
-            exceptions::IOError::py_err(format!("Cannot read norms chunk length\n{}", e))
-        })?;
-
-        let len = read.read_u64::<LittleEndian>().map_err(|e| {
-            exceptions::IOError::py_err(format!("Cannot read norms vector length\n{}", e))
-        })? as usize;
-
-        f32::ensure_data_type(read)?;
-
-        let n_padding = padding::<f32>(read.seek(SeekFrom::Current(0)).map_err(|e| {
-            exceptions::IOError::py_err(format!(
-                "Cannot get file position for computing padding\n{}",
-                e
-            ))
-        })?);
-
-        read.seek(SeekFrom::Current(n_padding as i64))
-            .map_err(|e| exceptions::IOError::py_err(format!("Cannot skip padding\n{}", e)))?;
-
-        let mut data = vec![0f32; len];
-        read.read_f32_into::<LittleEndian>(&mut data)
-            .map_err(|e| exceptions::IOError::py_err(format!("Cannot read norms\n{}", e)))?;
-        Ok(PyNorms::new(Rc::new(data.into())))
+    pub(crate) fn repr_(&self, start: usize) -> String {
+        let padding = if start != 0 {
+            start + 4 - (start + 4) % 4
+        } else {
+            0
+        };
+        let mut repr = iter::repeat(" ").take(padding - start).collect::<String>();
+        let level2_padding = iter::repeat(" ").take(padding + 4).collect::<String>();
+        repr += "Norms {\n";
+        repr += &level2_padding;
+        repr += &format!("len: {},\n", self.len());
+        repr += &level2_padding;
+        if self.len() > 10 {
+            repr += &format!(
+                "norms: [{},...],\n",
+                self.iter().take(10).map(|&n| n.to_string()).join(", ")
+            );
+        } else {
+            repr += &format!(
+                "norms: [{}],\n",
+                self.iter().map(|&n| n.to_string()).join(", ")
+            );
+        }
+        repr += &iter::repeat(" ").take(padding).collect::<String>();;
+        repr.push('}');
+        repr
     }
 }
 
@@ -76,6 +71,7 @@ impl Deref for PyNorms {
 
 #[pymethods]
 impl PyNorms {
+    #[allow(unused_must_use)]
     #[new]
     fn __new__(obj: &PyRawObject, filename: &str) -> PyResult<()> {
         let file = File::open(filename).map_err(|e| {
@@ -85,8 +81,8 @@ impl PyNorms {
             ))
         })?;
         let mut read = BufReader::new(file);
-        find_chunk(&mut read, &[ChunkIdentifier::NdNorms])?;
-        obj.init(Self::read(&mut read)?);
+        find_chunk(&mut read, &[ChunkIdentifier::NdNorms]);
+        obj.init(Self::read_chunk(&mut read)?);
         Ok(())
     }
 
@@ -166,20 +162,7 @@ impl<'a> PySequenceProtocol<'a> for PyNorms {
 #[pyproto]
 impl<'a> PyObjectProtocol<'a> for PyNorms {
     fn __repr__(&self) -> PyResult<String> {
-        let mut repr = format!("Norms {{\n\tlen:\t{},\n", self.len());
-        if self.len() > 10 {
-            repr.push_str(&format!(
-                "\tnorms: [{},\n\t\t...],\n",
-                self.iter().take(10).map(|&n| n.to_string()).join(",\n\t\t")
-            ));
-        } else {
-            repr.push_str(&format!(
-                "\tnorms: [{}],\n",
-                self.iter().map(|&n| n.to_string()).join(",\n\t\t")
-            ));
-        }
-        repr.push('}');
-        Ok(repr)
+        Ok(self.repr_(0))
     }
 }
 
@@ -240,5 +223,40 @@ impl WriteChunk for PyNorms {
         }
 
         Ok(())
+    }
+}
+
+impl ReadChunk for PyNorms {
+    fn read_chunk<R>(read: &mut R) -> Result<Self, PyErr>
+    where
+        R: Read + Seek,
+    {
+        ChunkIdentifier::ensure_chunk_type(read, ChunkIdentifier::NdNorms)?;
+
+        // Read and discard chunk length.
+        read.read_u64::<LittleEndian>().map_err(|e| {
+            exceptions::IOError::py_err(format!("Cannot read norms chunk length\n{}", e))
+        })?;
+
+        let len = read.read_u64::<LittleEndian>().map_err(|e| {
+            exceptions::IOError::py_err(format!("Cannot read norms vector length\n{}", e))
+        })? as usize;
+
+        f32::ensure_data_type(read).map_err(|e| exceptions::IOError::py_err(e.to_string()))?;
+
+        let n_padding = padding::<f32>(read.seek(SeekFrom::Current(0)).map_err(|e| {
+            exceptions::IOError::py_err(format!(
+                "Cannot get file position for computing padding\n{}",
+                e
+            ))
+        })?);
+
+        read.seek(SeekFrom::Current(n_padding as i64))
+            .map_err(|e| exceptions::IOError::py_err(format!("Cannot skip padding\n{}", e)))?;
+
+        let mut data = vec![0f32; len];
+        read.read_f32_into::<LittleEndian>(&mut data)
+            .map_err(|e| exceptions::IOError::py_err(format!("Cannot read norms\n{}", e)))?;
+        Ok(PyNorms::new(Rc::new(data.into())))
     }
 }
