@@ -1,9 +1,11 @@
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::fs::File;
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::mem::size_of;
 use std::rc::Rc;
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use finalfusion::prelude::{Storage, StorageView};
+use finalfusion::storage::{Storage, StorageView};
+use memmap::Mmap;
 use ndarray::{
     Array, Array1, Array2, ArrayView1, ArrayView2, CowArray, Dimension, IntoDimension, Ix1,
 };
@@ -15,6 +17,7 @@ use reductive::pq::{QuantizeVector, ReconstructVector, TrainPQ, PQ};
 
 use crate::io::{padding, ChunkIdentifier, TypeId};
 use crate::storage::{PyStorage, StorageWrap};
+use crate::util::mmap_array;
 
 /// Quantized embedding matrix.
 pub struct QuantizedArray {
@@ -52,7 +55,10 @@ impl Storage for QuantizedArray {
     }
 
     fn shape(&self) -> (usize, usize) {
-        unimplemented!()
+        (
+            self.quantized_embeddings.nrows(),
+            self.quantizer.reconstructed_len(),
+        )
     }
 }
 
@@ -62,12 +68,63 @@ struct PQRead {
     read_norms: bool,
 }
 
+/// Memory-mapped quantized embedding matrix.
+pub struct MmapQuantizedArray {
+    quantizer: PQ<f32>,
+    quantized_embeddings: Mmap,
+    norms: Option<Array1<f32>>,
+}
+
+impl MmapQuantizedArray {
+    /// Get the quantizer.
+    pub(crate) fn quantizer(&self) -> &PQ<f32> {
+        &self.quantizer
+    }
+
+    /// Get the quantized embeddings.
+    pub(crate) fn embeddings(&self) -> ArrayView2<u8> {
+        unsafe { self.quantized_embeddings() }
+    }
+
+    /// Get the norms.
+    pub(crate) fn norms(&self) -> Option<ArrayView1<f32>> {
+        self.norms.as_ref().map(|n| n.view())
+    }
+}
+
+impl MmapQuantizedArray {
+    unsafe fn quantized_embeddings(&self) -> ArrayView2<u8> {
+        let n_embeddings = self.shape().0;
+
+        ArrayView2::from_shape_ptr(
+            (n_embeddings, self.quantizer.quantized_len()),
+            self.quantized_embeddings.as_ptr(),
+        )
+    }
+}
+
+impl Storage for MmapQuantizedArray {
+    fn embedding(&self, idx: usize) -> CowArray<f32, Ix1> {
+        let quantized = unsafe { self.quantized_embeddings() };
+
+        let mut reconstructed = self.quantizer.reconstruct_vector(quantized.row(idx));
+        if let Some(norms) = &self.norms {
+            reconstructed *= norms[idx];
+        }
+
+        CowArray::from(reconstructed)
+    }
+
+    fn shape(&self) -> (usize, usize) {
+        (
+            self.quantized_embeddings.len() / self.quantizer.quantized_len(),
+            self.quantizer.reconstructed_len(),
+        )
+    }
+}
+
 impl PyStorage {
-    /// Read a quantized chunk.
-    pub(crate) fn read_quantized_chunk<R>(read: &mut R) -> PyResult<Self>
-    where
-        R: Read + Seek,
-    {
+    pub(crate) fn load_quantized(read: &mut BufReader<File>, mmap: bool) -> PyResult<Self> {
         ChunkIdentifier::ensure_chunk_type(read, ChunkIdentifier::QuantizedArray)?;
         // Read and discard chunk length.
         read.read_u64::<LittleEndian>().map_err(|e| {
@@ -90,7 +147,23 @@ impl PyStorage {
         } else {
             None
         };
+        if mmap {
+            Self::mmap_quantized(read, quantizer, n_embeddings, norms)
+        } else {
+            Self::read_quantized_chunk(read, quantizer, n_embeddings, norms)
+        }
+    }
 
+    /// Read a quantized chunk.
+    pub(crate) fn read_quantized_chunk<R>(
+        read: &mut R,
+        quantizer: PQ<f32>,
+        n_embeddings: usize,
+        norms: Option<Array1<f32>>,
+    ) -> PyResult<Self>
+    where
+        R: Read + Seek,
+    {
         let mut quantized_embeddings_vec = vec![0u8; n_embeddings * quantizer.quantized_len()];
         read.read_exact(&mut quantized_embeddings_vec)
             .map_err(|e| {
@@ -108,6 +181,25 @@ impl PyStorage {
         };
         Ok(PyStorage::new(Rc::new(StorageWrap::QuantizedArray(
             Box::new(array),
+        ))))
+    }
+
+    pub(crate) fn mmap_quantized(
+        read: &mut BufReader<File>,
+        quantizer: PQ<f32>,
+        n_embeddings: usize,
+        norms: Option<Array1<f32>>,
+    ) -> PyResult<Self> {
+        let matrix_len = n_embeddings * quantizer.quantized_len();
+        let map = mmap_array(read, matrix_len)?;
+
+        let quantized = MmapQuantizedArray {
+            quantizer,
+            quantized_embeddings: map,
+            norms,
+        };
+        Ok(PyStorage::new(Rc::new(StorageWrap::MmapQuantizedArray(
+            quantized,
         ))))
     }
 

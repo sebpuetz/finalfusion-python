@@ -1,24 +1,21 @@
+use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::mem::size_of;
 use std::rc::Rc;
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use finalfusion::chunks::storage::NdArray;
-use memmap::{Mmap, MmapOptions};
+use finalfusion::storage::{NdArray, Storage, StorageView};
+use memmap::Mmap;
 use ndarray::{Array2, ArrayView2, CowArray, Dimension, Ix1, Ix2};
 use pyo3::exceptions;
 use pyo3::prelude::*;
 
 use crate::io::{padding, ChunkIdentifier, TypeId};
 use crate::storage::{PyStorage, StorageWrap};
-use finalfusion::prelude::{Storage, StorageView};
-use std::fs::File;
+use crate::util::mmap_array;
 
 impl PyStorage {
-    pub(crate) fn read_array_storage<R>(read: &mut R) -> PyResult<Self>
-    where
-        R: Read + Seek,
-    {
+    pub(crate) fn load_array(read: &mut BufReader<File>, mmap: bool) -> PyResult<Self> {
         ChunkIdentifier::ensure_chunk_type(read, ChunkIdentifier::NdArray)?;
         // Read and discard chunk length.
         read.read_u64::<LittleEndian>().map_err(|e| {
@@ -40,7 +37,17 @@ impl PyStorage {
 
         // The components of the embedding matrix should be of type f32.
         f32::ensure_data_type(read).map_err(|e| exceptions::IOError::py_err(e.to_string()))?;
+        if mmap {
+            Self::mmap_array(read, rows, cols)
+        } else {
+            Self::read_array_storage(read, rows, cols)
+        }
+    }
 
+    pub(crate) fn read_array_storage<R>(read: &mut R, rows: usize, cols: usize) -> PyResult<Self>
+    where
+        R: Read + Seek,
+    {
         let n_padding = padding::<f32>(read.seek(SeekFrom::Current(0)).map_err(|e| {
             exceptions::IOError::py_err(format!(
                 "Cannot get file position for computing padding\n{}",
@@ -61,65 +68,14 @@ impl PyStorage {
         Ok(PyStorage::new(Rc::new(NdArray::new(array).into())))
     }
 
-    pub(crate) fn mmap_array(read: &mut BufReader<File>) -> PyResult<Self> {
-        ChunkIdentifier::ensure_chunk_type(read, ChunkIdentifier::NdArray)?;
-        // Read and discard chunk length.
-        read.read_u64::<LittleEndian>().map_err(|e| {
-            exceptions::IOError::py_err(format!("Cannot read embedding matrix chunk length\n{}", e))
-        })?;
-
-        let rows = read.read_u64::<LittleEndian>().map_err(|e| {
-            exceptions::IOError::py_err(format!(
-                "Cannot read number of rows of the embedding matrix\n{}",
-                e
-            ))
-        })? as usize;
-        let cols = read.read_u32::<LittleEndian>().map_err(|e| {
-            exceptions::IOError::py_err(format!(
-                "Cannot read number of columns of the embedding matrix\n{}",
-                e
-            ))
-        })? as usize;
+    pub(crate) fn mmap_array(
+        read: &mut BufReader<File>,
+        rows: usize,
+        cols: usize,
+    ) -> PyResult<Self> {
         let shape = Ix2(rows, cols);
 
-        // The components of the embedding matrix should be of type f32.
-        f32::ensure_data_type(read).map_err(|e| exceptions::IOError::py_err(e.to_string()))?;
-
-        let n_padding = padding::<f32>(read.seek(SeekFrom::Current(0)).map_err(|e| {
-            exceptions::IOError::py_err(format!(
-                "Cannot get file position for computing padding\n{}",
-                e
-            ))
-        })?);
-        read.seek(SeekFrom::Current(n_padding as i64))
-            .map_err(|e| exceptions::IOError::py_err(format!("Cannot skip padding\n{}", e)))?;
-
-        // Set up memory mapping.
-        let matrix_len = shape.size() * size_of::<f32>();
-        let offset = read.seek(SeekFrom::Current(0)).map_err(|e| {
-            exceptions::IOError::py_err(format!(
-                "Cannot get file position for memory mapping embedding matrix\n{}",
-                e,
-            ))
-        })?;
-        let mut mmap_opts = MmapOptions::new();
-        let map = unsafe {
-            mmap_opts
-                .offset(offset)
-                .len(matrix_len)
-                .map(&read.get_ref())
-                .map_err(|e| {
-                    exceptions::IOError::py_err(format!(
-                        "Cannot memory map embedding matrix\n{}",
-                        e
-                    ))
-                })?
-        };
-        // Position the reader after the matrix.
-        read.seek(SeekFrom::Current(matrix_len as i64))
-            .map_err(|e| {
-                exceptions::IOError::py_err(format!("Cannot skip embedding matrix\n{}", e))
-            })?;
+        let map = mmap_array(read, shape.size() * size_of::<f32>())?;
         let mmap = StorageWrap::MmapArray(MmapArray { map, shape });
         Ok(PyStorage::new(Rc::new(mmap)))
     }

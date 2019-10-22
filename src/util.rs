@@ -1,9 +1,23 @@
-use ndarray::ArrayViewMut1;
-use numpy::{NpyDataType, PyArray1, PyArray2};
+use crate::io::padding;
+use memmap::{Mmap, MmapOptions};
+use ndarray::{ArrayViewMut1, ArrayViewMut, Dimension, Array, ArrayBase, Data, Axis, RemoveAxis};
+use numpy::{NpyDataType, PyArray1, PyArray2, ToPyArray, TypeNum};
 use pyo3::exceptions;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyIterator};
 use std::collections::HashSet;
+use std::fs::File;
+use std::io::{BufReader, Seek, SeekFrom};
+
+pub fn nd_to_pyobject<S, D, A>(a: ArrayBase<S, D>) -> PyObject
+    where
+        S: Data<Elem = A>,
+        D: Dimension,
+        A: TypeNum,
+{
+    let gil = Python::acquire_gil();
+    a.to_pyarray(gil.python()).to_object(gil.python())
+}
 
 pub fn l2_normalize(mut v: ArrayViewMut1<f32>) -> f32 {
     let norm = v.dot(&v).sqrt();
@@ -15,15 +29,76 @@ pub fn l2_normalize(mut v: ArrayViewMut1<f32>) -> f32 {
     norm
 }
 
+pub fn l2_normalize_nd<D>(mut v: ArrayViewMut<f32, D>) -> Array<f32, D::Smaller>
+    where D: Dimension + RemoveAxis {
+    let mut norms = Vec::with_capacity(v.shape().len());
+    for row in v.genrows_mut() {
+        norms.push(l2_normalize(row))
+    }
+
+    let norms_shape = v.raw_dim().remove_axis(Axis(v.ndim()-1));
+    Array::from_shape_vec(norms_shape, norms)
+        .expect("Invalid shapes after normalization")
+}
+
+pub fn mmap_array(read: &mut BufReader<File>, array_len: usize) -> PyResult<Mmap> {
+    let n_padding = padding::<f32>(read.seek(SeekFrom::Current(0)).map_err(|e| {
+        exceptions::IOError::py_err(format!(
+            "Cannot get file position for computing padding\n{}",
+            e
+        ))
+    })?);
+    read.seek(SeekFrom::Current(n_padding as i64))
+        .map_err(|e| exceptions::IOError::py_err(format!("Cannot skip padding\n{}", e)))?;
+
+    // Set up memory mapping.
+    let offset = read.seek(SeekFrom::Current(0)).map_err(|e| {
+        exceptions::IOError::py_err(format!(
+            "Cannot get file position for memory mapping embedding matrix\n{}",
+            e,
+        ))
+    })?;
+    let mut mmap_opts = MmapOptions::new();
+    let map = unsafe {
+        mmap_opts
+            .offset(offset)
+            .len(array_len)
+            .map(&read.get_ref())
+            .map_err(|e| exceptions::IOError::py_err(format!("Cannot memory map array\n{}", e)))?
+    };
+    // Position the reader after the matrix.
+    read.seek(SeekFrom::Current(array_len as i64))
+        .map_err(|e| exceptions::IOError::py_err(format!("Cannot skip mmapped array\n{}", e)))?;
+    Ok(map)
+}
+
 pub enum PyEmbeddingDefault {
     Embedding(Py<PyArray1<f32>>),
     Constant(f32),
     None,
 }
 
-impl<'a> Default for PyEmbeddingDefault {
+impl Default for PyEmbeddingDefault {
     fn default() -> Self {
         PyEmbeddingDefault::None
+    }
+}
+
+impl Clone for PyEmbeddingDefault {
+    fn clone(&self) -> Self {
+        match self {
+            PyEmbeddingDefault::Constant(c) => PyEmbeddingDefault::Constant(*c),
+            PyEmbeddingDefault::Embedding(e) => {
+                let gil = Python::acquire_gil();
+                PyEmbeddingDefault::Embedding(
+                    e.as_ref(gil.python())
+                        .as_array()
+                        .to_pyarray(gil.python())
+                        .to_owned(),
+                )
+            }
+            PyEmbeddingDefault::None => PyEmbeddingDefault::None,
+        }
     }
 }
 
@@ -113,11 +188,43 @@ pub(crate) struct PyMatrix<'a>(pub &'a PyArray2<f32>);
 impl<'a> FromPyObject<'a> for PyMatrix<'a> {
     fn extract(ob: &'a PyAny) -> Result<Self, PyErr> {
         if let Ok(matrix) = ob.extract::<&PyArray2<f32>>() {
-            return Ok(PyMatrix(matrix))
+            return Ok(PyMatrix(matrix));
         }
         if let Ok(matrix) = ob.extract::<&PyArray2<f64>>() {
-            return Ok(PyMatrix(matrix.cast::<f32>(false)?))
+            return Ok(PyMatrix(matrix.cast::<f32>(false)?));
         }
-        return Err(exceptions::TypeError::py_err(format!("Expected 2-d float array.",)));
+        Err(exceptions::TypeError::py_err("Expected 2-d float array."))
+    }
+}
+
+#[derive(Debug)]
+pub enum PyQuery<V> {
+    Word(V),
+    List(Vec<V>),
+    Batch(Vec<Vec<V>>),
+    BatchPlusOne(Vec<Vec<Vec<V>>>),
+}
+
+impl<'a, V> FromPyObject<'a> for PyQuery<V>
+where
+    V: FromPyObject<'a>,
+{
+    fn extract(ob: &'a PyAny) -> PyResult<Self> {
+        if let Ok(string) = ob.extract() {
+            return Ok(PyQuery::Word(string));
+        }
+
+        if let Ok(first) = ob.extract() {
+            return Ok(PyQuery::List(first));
+        }
+        if let Ok(second) = ob.extract() {
+            return Ok(PyQuery::Batch(second));
+        }
+        if let Ok(third) = ob.extract() {
+            return Ok(PyQuery::BatchPlusOne(third));
+        }
+        Err(exceptions::ValueError::py_err(
+            "Expected scalar, list of scalars of nested list of scalars.",
+        ))
     }
 }

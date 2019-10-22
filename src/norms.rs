@@ -5,7 +5,7 @@ use std::ops::Deref;
 use std::rc::Rc;
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use finalfusion::chunks::norms::NdNorms;
+use finalfusion::norms::NdNorms;
 use itertools::Itertools;
 use ndarray::Array1;
 use numpy::{PyArray1, ToPyArray};
@@ -55,7 +55,7 @@ impl PyNorms {
                 self.iter().map(|&n| n.to_string()).join(", ")
             );
         }
-        repr += &iter::repeat(" ").take(padding).collect::<String>();;
+        repr += &iter::repeat(" ").take(padding).collect::<String>();
         repr.push('}');
         repr
     }

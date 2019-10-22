@@ -1,5 +1,6 @@
+use crate::storage::quantized::MmapQuantizedArray;
 use crate::storage::{MmapArray, QuantizedArray};
-use finalfusion::chunks::storage::{NdArray, Storage};
+use finalfusion::storage::{NdArray, Storage};
 use ndarray::{CowArray, Ix1};
 
 #[allow(dead_code)]
@@ -7,13 +8,13 @@ pub enum StorageWrap {
     NdArray(NdArray),
     MmapArray(MmapArray),
     QuantizedArray(Box<QuantizedArray>),
-    MmapQuantizedArray,
+    MmapQuantizedArray(MmapQuantizedArray),
 }
 
 impl StorageWrap {
     pub fn quantized(&self) -> bool {
         match self {
-            StorageWrap::QuantizedArray(_) | StorageWrap::MmapQuantizedArray => true,
+            StorageWrap::QuantizedArray(_) | StorageWrap::MmapQuantizedArray(_) => true,
             _ => false,
         }
     }
@@ -25,7 +26,7 @@ impl Storage for StorageWrap {
             StorageWrap::NdArray(array) => array.embedding(idx),
             StorageWrap::MmapArray(array) => array.embedding(idx),
             StorageWrap::QuantizedArray(array) => array.embedding(idx),
-            StorageWrap::MmapQuantizedArray => unimplemented!(),
+            StorageWrap::MmapQuantizedArray(array) => array.embedding(idx),
         }
     }
 
@@ -34,7 +35,7 @@ impl Storage for StorageWrap {
             StorageWrap::NdArray(array) => array.shape(),
             StorageWrap::MmapArray(array) => array.shape(),
             StorageWrap::QuantizedArray(array) => array.shape(),
-            StorageWrap::MmapQuantizedArray => unimplemented!(),
+            StorageWrap::MmapQuantizedArray(array) => array.shape(),
         }
     }
 }

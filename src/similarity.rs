@@ -6,10 +6,12 @@ use ordered_float::NotNan;
 use pyo3::class::basic::PyObjectProtocol;
 use pyo3::prelude::*;
 
+use finalfusion::storage::StorageView;
+use finalfusion::vocab::Vocab;
+
 use crate::embeddings::PyEmbeddings;
 use crate::storage::StorageWrap;
 use crate::util::l2_normalize;
-use finalfusion::prelude::{StorageView, Vocab};
 
 impl Analogy for PyEmbeddings {
     fn analogy_masked(
@@ -179,7 +181,7 @@ impl SimilarityPrivate for PyEmbeddings {
             .expect("Storage is required for similarity queries.");
         use StorageWrap::*;
         let view = match storage {
-            MmapQuantizedArray | QuantizedArray(_) => {
+            MmapQuantizedArray(_) | QuantizedArray(_) => {
                 unreachable!("This similarity fn should not be reachable.")
             }
             MmapArray(array) => array.view(),

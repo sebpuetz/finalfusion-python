@@ -4,11 +4,12 @@ use std::io::{BufReader, BufWriter};
 use std::mem;
 use std::rc::Rc;
 
-use finalfusion::chunks::norms::NdNorms;
-use finalfusion::chunks::vocab::WordIndex;
+use finalfusion::norms::NdNorms;
+use finalfusion::storage::{NdArray, Storage};
+use finalfusion::vocab::{Vocab, WordIndex};
 use finalfusion::io as ffio;
 use finalfusion::prelude::{
-    Embeddings, NdArray, ReadFastText, ReadText, ReadTextDims, ReadWord2Vec, Storage, Vocab,
+    Embeddings, ReadFastText, ReadText, ReadTextDims, ReadWord2Vec,
     VocabWrap,
 };
 use finalfusion::similarity::{Analogy, EmbeddingSimilarity, WordSimilarity};
@@ -25,7 +26,7 @@ use crate::metadata::PyMetadata;
 use crate::norms::PyNorms;
 use crate::similarity::similarity_results;
 use crate::storage::{PyStorage, StorageWrap};
-use crate::util::{l2_normalize, PyEmbedding, PyEmbeddingDefault, Skips};
+use crate::util::{l2_normalize, PyEmbedding, PyEmbeddingDefault, Skips, PyQuery};
 use crate::{io, PyEmbeddingIterator, PyVocab};
 
 /// finalfusion embeddings.
@@ -170,20 +171,10 @@ impl PyEmbeddings {
         for chunk in chunks {
             match chunk {
                 NdArray => {
-                    if mmap {
-                        embeddings.set_storage(Some(PyStorage::mmap_array(&mut reader)?));
-                    } else {
-                        embeddings.set_storage(Some(PyStorage::read_array_storage(&mut reader)?));
-                    }
+                    embeddings.set_storage(Some(PyStorage::load_array(&mut reader, mmap)?));
                 }
                 QuantizedArray => {
-                    if mmap {
-                        return Err(exceptions::NotImplementedError::py_err(
-                            "Mmapped quantized storage is not yet implemented.",
-                        ));
-                    } else {
-                        embeddings.set_storage(Some(PyStorage::read_quantized_chunk(&mut reader)?));
-                    }
+                    embeddings.set_storage(Some(PyStorage::load_quantized(&mut reader, mmap)?));
                 }
                 NdNorms => {
                     embeddings.set_norms(Some(PyNorms::read_chunk(&mut reader)?));
@@ -202,7 +193,7 @@ impl PyEmbeddings {
             };
         }
         if embeddings.norms.is_none() {
-            embeddings.set_norms(Some(PyNorms::read_chunk(&mut reader)?));
+            embeddings.set_norms(PyNorms::read_chunk(&mut reader).ok());
         }
 
         obj.init(embeddings);
@@ -362,7 +353,7 @@ impl PyEmbeddings {
     #[args(default = "PyEmbeddingDefault::default()")]
     fn embedding(
         &self,
-        word: &str,
+        query: PyQuery<&str>,
         default: PyEmbeddingDefault,
     ) -> PyResult<Option<Py<PyArray1<f32>>>> {
         if self.vocab.is_none() {
@@ -376,21 +367,24 @@ impl PyEmbeddings {
 
         let gil = pyo3::Python::acquire_gil();
         if let PyEmbeddingDefault::Embedding(array) = &default {
-            if array.as_ref(gil.python()).shape()[0] != cols {
+            if array.as_ref(gil.python()).as_array().shape()[0] != cols {
                 return Err(exceptions::ValueError::py_err(format!(
                     "Invalid shape of default embedding: {}",
-                    array.as_ref(gil.python()).shape()[0]
+                    array.as_ref(gil.python()).as_array().shape()[0]
                 )));
             }
         }
+        println!("{:?}", query);
 
-        if let Some(embedding) = self.embedding_(word) {
-            let embedding = embedding.to_owned();
+        if let PyQuery::Word(word) = query {
+            if let Some(embedding) = self.embedding_(&word) {
+                let embedding = embedding.to_owned();
 
-            return Ok(Some(
-                PyArray1::from_owned_array(gil.python(), embedding).to_owned(),
-            ));
-        };
+                return Ok(Some(
+                    PyArray1::from_owned_array(gil.python(), embedding).to_owned(),
+                ));
+            };
+        }
         match default {
             PyEmbeddingDefault::Constant(constant) => {
                 let nd_arr = Array1::from_elem([cols], constant);
@@ -437,14 +431,11 @@ impl PyEmbeddings {
                 "Embeddings need to contain vocab and storage for similarity queries.",
             ));
         }
-        use StorageWrap::*;
-        match storage.unwrap() {
-            MmapQuantizedArray | QuantizedArray(_) => {
-                return Err(exceptions::ValueError::py_err(
-                    "Similarity queries are not supported for this type of embedding matrix",
-                ))
-            }
-            _ => (),
+
+        if storage.unwrap().quantized() {
+            return Err(exceptions::ValueError::py_err(
+                "Similarity queries are not supported for this type of embedding matrix",
+            ));
         };
         let results = <Self as WordSimilarity>::word_similarity(&self, word, limit)
             .ok_or_else(|| exceptions::KeyError::py_err("Unknown word and n-grams"))?;
@@ -468,14 +459,10 @@ impl PyEmbeddings {
             ));
         }
         let storage = storage.unwrap();
-        use StorageWrap::*;
-        match storage {
-            MmapQuantizedArray | QuantizedArray(_) => {
-                return Err(exceptions::ValueError::py_err(
-                    "Similarity queries are not supported for this type of embedding matrix",
-                ))
-            }
-            _ => (),
+        if storage.quantized() {
+            return Err(exceptions::ValueError::py_err(
+                "Similarity queries are not supported for this type of embedding matrix",
+            ));
         };
 
         let embedding = embedding.0.as_array();

@@ -1,4 +1,5 @@
-use finalfusion::prelude::*;
+use finalfusion::vocab::Vocab;
+use finalfusion::storage::Storage;
 use numpy::{IntoPyArray, PyArray1};
 use pyo3::class::iter::PyIterProtocol;
 use pyo3::exceptions;

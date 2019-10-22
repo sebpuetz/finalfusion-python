@@ -5,7 +5,7 @@ use std::ops::Deref;
 use std::rc::Rc;
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use finalfusion::chunks::metadata::Metadata;
+use finalfusion::metadata::Metadata;
 use pyo3::prelude::*;
 use pyo3::{exceptions, PyObjectProtocol, PyResult};
 use toml::Value;

@@ -7,9 +7,8 @@ use std::rc::Rc;
 
 use crate::io::{find_chunk, ChunkIdentifier, Header, ReadChunk, WriteChunk};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use finalfusion::chunks::vocab::{BucketSubwordVocab, ExplicitSubwordVocab, FastTextSubwordVocab, NGramIndices, SubwordIndices, WordIndex, SubwordVocab};
+use finalfusion::vocab::*;
 use finalfusion::compat::fasttext::FastTextIndexer;
-use finalfusion::prelude::*;
 use finalfusion::subword::{
     BucketIndexer, ExplicitIndexer, FinalfusionHashIndexer, Indexer, NGrams,
 };
