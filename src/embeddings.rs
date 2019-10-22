@@ -55,6 +55,13 @@ impl PyEmbeddings {
         }
     }
 
+    fn is_empty_(&self) -> bool {
+        match (&self.storage, &self.vocab, &self.norms, &self.metadata) {
+            (None, None, None, None) => true,
+            _ => false
+        }
+    }
+
     pub(crate) fn embedding_(&self, word: &str) -> Option<CowArray<f32, Ix1>> {
         let vocab = self.vocab_()?;
         let storage = self.storage_()?;
@@ -199,6 +206,25 @@ impl PyEmbeddings {
         obj.init(embeddings);
 
         Ok(())
+    }
+
+    #[args(vocab = "None", norms = "None", storage = "None", metadata = "None")]
+    #[staticmethod]
+    fn from_parts(vocab: Option<Option<PyVocab>>,
+                  norms: Option<Option<PyNorms>>,
+                  storage: Option<Option<PyStorage>>,
+                  metadata: Option<Option<PyMetadata>>)
+        -> PyResult<Self> {
+        let mut embeddings = Self::empty();
+        embeddings.set_metadata(metadata.unwrap());
+        embeddings.set_norms(norms.unwrap());
+        embeddings.set_storage(storage.unwrap());
+        embeddings.set_vocab(vocab.unwrap());
+        if embeddings.is_empty_() {
+            Err(exceptions::ValueError::py_err("Can't construct vocab from no components."))
+        } else {
+            Ok(embeddings)
+        }
     }
 
     /// read_fasttext(path,/ lossy)

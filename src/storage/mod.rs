@@ -29,6 +29,7 @@ use crate::io::{find_chunk, ChunkIdentifier, Header, WriteChunk};
 use crate::storage::quantized::quantize_;
 use crate::util::{l2_normalize_nd, nd_to_pyobject, PyMatrix, PyQuery};
 use crate::util;
+use pyo3::types::PyAny;
 
 /// finalfusion storage.
 #[pyclass(name = Storage)]
@@ -498,5 +499,12 @@ impl WriteChunk for PyStorage {
                 Self::write_quantized(write, array.quantizer(), array.embeddings(), array.norms())
             }
         }
+    }
+}
+
+impl<'a> FromPyObject<'a> for PyStorage {
+    fn extract(ob: &'a PyAny) -> Result<Self, PyErr> {
+        let storage = ob.downcast_ref::<PyStorage>()?;
+        Ok(storage.clone())
     }
 }

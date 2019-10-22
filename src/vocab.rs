@@ -17,6 +17,7 @@ use pyo3::class::sequence::PySequenceProtocol;
 use pyo3::prelude::*;
 use pyo3::{exceptions, PyObjectProtocol};
 use std::iter;
+use pyo3::types::PyAny;
 
 type NGramIndex = (String, Option<usize>);
 
@@ -803,4 +804,11 @@ where
             .map_err(|e| exceptions::IOError::py_err(format!("Cannot write token\n{}", e)))?;
     }
     Ok(())
+}
+
+impl<'a> FromPyObject<'a> for PyVocab {
+    fn extract(ob: &'a PyAny) -> Result<Self, PyErr> {
+        let vocab = ob.downcast_ref::<PyVocab>()?;
+        Ok(vocab.clone())
+    }
 }

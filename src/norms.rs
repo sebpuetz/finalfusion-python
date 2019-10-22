@@ -260,3 +260,10 @@ impl ReadChunk for PyNorms {
         Ok(PyNorms::new(Rc::new(data.into())))
     }
 }
+
+impl<'a> FromPyObject<'a> for PyNorms {
+    fn extract(ob: &'a PyAny) -> Result<Self, PyErr> {
+        let storage = ob.downcast_ref::<PyNorms>()?;
+        Ok(storage.clone())
+    }
+}

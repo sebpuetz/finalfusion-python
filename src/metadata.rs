@@ -11,6 +11,7 @@ use pyo3::{exceptions, PyObjectProtocol, PyResult};
 use toml::Value;
 
 use crate::io::{find_chunk, ChunkIdentifier, ReadChunk, WriteChunk};
+use pyo3::types::PyAny;
 
 /// finalfusion storage.
 #[pyclass(name=Metadata)]
@@ -142,5 +143,12 @@ impl WriteChunk for PyMetadata {
             .write_all(metadata_str.as_bytes())
             .map_err(|e| exceptions::IOError::py_err(format!("Cannot write metadata\n{}", e)))?;
         Ok(())
+    }
+}
+
+impl<'a> FromPyObject<'a> for PyMetadata {
+    fn extract(ob: &'a PyAny) -> Result<Self, PyErr> {
+        let metadata = ob.downcast_ref::<PyMetadata>()?;
+        Ok(metadata.clone())
     }
 }
