@@ -1,0 +1,15 @@
+[package]
+name = "finalfusion-python-standalone"
+version = "0.1.0"
+authors = ["Sebastian Puetz <sebastian.puetz@uni-tuebingen.de>"]
+edition = "2018"
+
+[lib]
+name = "finalfusion_standalone"
+crate-type = ["cdylib"]
+
+[dependencies.pyo3]
+version = "0.8"
+features = ["extension-module"]
+
+[dependencies]
